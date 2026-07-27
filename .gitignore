@@ -1,0 +1,5 @@
+/caddy
+/dist/
+*.mmdb
+*.test
+.DS_Store

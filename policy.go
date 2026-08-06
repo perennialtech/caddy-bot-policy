@@ -13,9 +13,9 @@ import (
 
 // BotPolicy is an HTTP middleware that blocks requests whose TLS client
 // fingerprint (JA4) matches an entry on a configured blocklist. The
-// fingerprint is not computed here; it is read from a Caddy request
-// variable set upstream by a fingerprinting module such as
-// github.com/matt-/caddy-ja4.
+// fingerprint is not computed here; it is read from the request variable
+// published by the ja4 handler, which in turn needs the ja4 listener wrapper
+// to have captured the ClientHello.
 //
 // Example Caddyfile usage:
 //
@@ -27,8 +27,8 @@ import (
 //		action                 block-403
 //	}
 type BotPolicy struct {
-	// VarName is the http.vars.* key that holds the fingerprint computed
-	// by an upstream module. Defaults to "ja4".
+	// VarName is the http.vars.* key that holds the fingerprint published
+	// by the ja4 handler. Defaults to "ja4".
 	VarName string `json:"var_name,omitempty"`
 
 	// Blocked is the list of JA4 fingerprints to block. At least one is
@@ -62,7 +62,7 @@ func (bp *BotPolicy) Provision(ctx caddy.Context) error {
 	bp.logger = ctx.Logger()
 
 	if bp.VarName == "" {
-		bp.VarName = "ja4"
+		bp.VarName = defaultVarName
 	}
 
 	if bp.OnMissingFingerprint == "" {

@@ -123,7 +123,7 @@ func (bp *BotPolicy) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 }
 
 func (bp *BotPolicy) block(w http.ResponseWriter, r *http.Request, fingerprint string) error {
-	id := generateBlockID()
+	id := newBlockID("bp-")
 
 	logFingerprint := fingerprint
 	if logFingerprint == "" {
@@ -143,10 +143,12 @@ func (bp *BotPolicy) block(w http.ResponseWriter, r *http.Request, fingerprint s
 	return nil
 }
 
-func generateBlockID() string {
+// newBlockID returns a short random ID, with a prefix naming the handler that
+// blocked the request, for matching a user's report to a log line.
+func newBlockID(prefix string) string {
 	var b [4]byte
 	_, _ = rand.Read(b[:])
-	return "bp-" + hex.EncodeToString(b[:])
+	return prefix + hex.EncodeToString(b[:])
 }
 
 // Interface guards.

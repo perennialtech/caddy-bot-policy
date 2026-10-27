@@ -1,9 +1,12 @@
 # caddy-bot-policy
 
 A [Caddy](https://caddyserver.com) plugin that computes the **JA4** TLS client
-fingerprint and blocks requests whose fingerprint is on a blocklist.
+fingerprint and blocks requests whose fingerprint is on a blocklist. It can
+also put a [Cloudflare Turnstile](https://developers.cloudflare.com/turnstile/)
+challenge in front of a site, with the clearance optionally bound to the
+client's fingerprint.
 
-The plugin provides four modules:
+The plugin provides five modules:
 
 | Module | What it does |
 |---|---|
@@ -11,6 +14,7 @@ The plugin provides four modules:
 | `caddy.packetconns.ja4` | Packet conn wrapper: does the same from QUIC Initial packets (HTTP/3) |
 | `http.handlers.ja4` | Publishes that fingerprint as a request variable |
 | `http.handlers.bot_policy` | Blocks requests whose fingerprint is on the list |
+| `http.handlers.turnstile` | Requires a Turnstile clearance cookie, serving a challenge page without one |
 
 They are separate because a JA4 **can only be computed before TLS is
 terminated**. Once the handshake completes the ClientHello is gone, and Go's
@@ -63,9 +67,9 @@ fingerprints start with `q` instead of `t`, so the same browser has a
 different JA4 over h3 than over h2 — block both if you mean to block a
 client.
 
-The `ja4` and `bot_policy` directives order themselves (`ja4` first), so no
-global `order` lines are needed unless they share a route with other
-third-party directives that need a specific order.
+The `ja4`, `bot_policy` and `turnstile` directives order themselves (in that
+order), so no global `order` lines are needed unless they share a route with
+other third-party directives that need a specific order.
 
 ### Observe only, without blocking
 
@@ -103,6 +107,116 @@ example.com {
 fingerprint is available (the header is then sent empty), so upstreams can
 trust it as long as they are only reachable through Caddy. Treat an empty
 value as "unknown", not as suspicious.
+
+### Turnstile challenge
+
+`turnstile` puts a Cloudflare Turnstile challenge in front of everything it
+covers. It does not need `ja4`, and does not need the site to be proxied
+through Cloudflare: create a widget in the Cloudflare dashboard for your
+hostname and give the plugin its keys.
+
+```caddyfile
+example.com {
+	turnstile {
+		site_key   {env.TURNSTILE_SITE_KEY}
+		secret_key {env.TURNSTILE_SECRET_KEY}
+	}
+	reverse_proxy localhost:8080
+}
+```
+
+The flow:
+
+1. A request with a valid clearance cookie goes straight through.
+2. Any other request gets a challenge page (status 403, `Cache-Control:
+   no-store`) hosting the widget.
+3. When the widget is solved, the page posts the token to `verify_path`.
+   Caddy redeems it with Cloudflare's siteverify endpoint and checks that it
+   succeeded, that it was solved on this hostname, and that it came from this
+   challenge (its `action`).
+4. On success the visitor gets the clearance cookie and is redirected (303)
+   back to the page they asked for. On failure they get a 403 with an
+   `X-Block-Id` (prefixed `ts-`) and no cookie; reloading shows a fresh
+   challenge. Nothing about the client is remembered or banned. If
+   Cloudflare cannot be reached, the answer is a 503 rather than a block.
+
+The clearance is **stateless**: the cookie holds its issue time and an
+HMAC-SHA256 over that time, the hostname and (if bound) the fingerprint.
+There is no server-side store, so clearances survive restarts and work across
+several Caddy instances as long as they share the same keys. Expiry is
+checked against the issue time and the TTL configured *now*, so shortening
+`clearance_ttl` applies to existing cookies straight away. The cookie is
+`HttpOnly`, `SameSite=Lax`, scoped to the host, and `Secure` over HTTPS.
+
+Combined with the blocklist, known-bad fingerprints are refused outright and
+everyone else is challenged once a month:
+
+```caddyfile
+example.com {
+	ja4
+	bot_policy {
+		block t13d1517h2_8daaf6152771_b6f405a00624
+	}
+	turnstile {
+		site_key         {env.TURNSTILE_SITE_KEY}
+		secret_key       {env.TURNSTILE_SECRET_KEY}
+		bind_fingerprint
+	}
+	reverse_proxy localhost:8080
+}
+```
+
+Like any handler directive, `turnstile` takes a matcher, so it can be kept
+off paths that are not loaded by a browser:
+
+```caddyfile
+@browser not path /api/* /webhooks/* /.well-known/*
+turnstile @browser {
+	site_key   {env.TURNSTILE_SITE_KEY}
+	secret_key {env.TURNSTILE_SECRET_KEY}
+}
+```
+
+Things to know:
+
+- **Only browsers can pass.** API clients, feeds, health checks and
+  webhooks that hit a challenged path get the 403 challenge page. Exclude
+  them with a matcher.
+- **Non-GET requests lose their body.** A POST without clearance is
+  answered with the challenge, and after solving it the visitor is
+  redirected to the same URL with a GET. In practice the first request of a
+  visit is a GET, so this rarely matters.
+- **Search engine crawlers are challenged too.** Exclude them by matcher if
+  you need them indexed.
+
+### `turnstile` subdirectives
+
+| Subdirective | Values | Description |
+|---|---|---|
+| `site_key` | Turnstile site key | Required. |
+| `secret_key` | Turnstile secret key | Required. `{env.*}` placeholders are expanded when the config loads, so the secret need not appear in the Caddyfile. |
+| `clearance_ttl` | duration (default `30d`) | How long a clearance stays valid after it is issued. Caddy durations, so `30d`, `720h` and so on. |
+| `clearance_key` | string of at least 32 bytes | Optional. Key that signs the cookie. By default one is derived from `secret_key`, which means **rotating the Turnstile secret invalidates every clearance**. Set this to rotate them independently. |
+| `cookie_name` | cookie name (default `bp_clearance`) | Name of the clearance cookie. |
+| `verify_path` | path (default `/.bot-policy/turnstile`) | Where the challenge page posts the token. POSTs to it are handled by `turnstile` and never reach your app. |
+| `bind_fingerprint` | `[var_name]` (default `ja4`) | Ties the clearance to the client's JA4 fingerprint, read from `http.vars.<var_name>`. See below. |
+
+### Binding the clearance to the fingerprint
+
+With `bind_fingerprint`, a clearance is only accepted from a client with the
+same JA4 it was issued to. A cookie copied out of a real browser and replayed
+from `curl` or a Python script presents a different TLS stack, so it is
+rejected and that client is challenged again. This needs the `ja4` handler
+and listener wrapper set up as above.
+
+The catch is that **the same browser has a different JA4 over HTTP/2 and
+HTTP/3** (see above). A visitor whose browser moves between the two — it
+will typically start on h2 and switch to h3 after seeing `Alt-Svc` — is asked
+to solve the challenge again on each switch. With Turnstile's managed mode
+that is usually invisible, but it is a real cost. If it matters, either leave
+binding off or serve the site without HTTP/3. A browser update that changes
+the fingerprint also means one more challenge. Requests that arrive without
+a fingerprint only match clearances that were also issued without one.
 
 ### `ja4` subdirectives
 
@@ -213,10 +327,10 @@ go vet ./...
 go test ./...
 ```
 
-The policy tests inject the fingerprint directly through
+The policy and Turnstile tests inject the fingerprint directly through
 `caddyhttp.SetVar`/`VarsCtxKey`; the fingerprint tests start a real listener
 and perform real handshakes with Go's TLS client, and with quic-go for
-HTTP/3.
+HTTP/3. The Turnstile tests run against a stand-in siteverify server.
 
 ## Status
 
@@ -225,5 +339,6 @@ HTTP/3.
 - [x] Per-directive `on_missing_fingerprint` open/closed
 - [x] `block-403` action with a block ID
 - [x] JA4 over QUIC/HTTP3 (packet conn wrapper)
+- [x] Cloudflare Turnstile challenge with a stateless, fingerprint-bindable clearance
 - [ ] More actions (e.g. `redirect`, `tarpit`)
 - [ ] Partial/prefix fingerprint matching

@@ -1,6 +1,7 @@
 package botpolicy
 
 import (
+	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
@@ -67,6 +68,78 @@ func (bp *BotPolicy) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 
 			default:
 				return d.Errf("unrecognized bot_policy subdirective '%s'", d.Val())
+			}
+		}
+	}
+	return nil
+}
+
+// parseTurnstileCaddyfile sets up a turnstile handler from Caddyfile tokens.
+//
+//	turnstile {
+//		site_key         <key>
+//		secret_key       <key>
+//		clearance_key    <at least 32 bytes>
+//		clearance_ttl    30d
+//		cookie_name      bp_clearance
+//		verify_path      /.bot-policy/turnstile
+//		bind_fingerprint [<var_name>]
+//	}
+func parseTurnstileCaddyfile(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error) {
+	var ts Turnstile
+	if err := ts.UnmarshalCaddyfile(h.Dispenser); err != nil {
+		return nil, err
+	}
+	return &ts, nil
+}
+
+// UnmarshalCaddyfile implements caddyfile.Unmarshaler.
+func (ts *Turnstile) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
+	for d.Next() {
+		if d.NextArg() {
+			return d.ArgErr()
+		}
+		for d.NextBlock(0) {
+			sub := d.Val()
+			switch sub {
+			case "bind_fingerprint":
+				ts.BindFingerprintVar = defaultVarName
+				if d.NextArg() {
+					ts.BindFingerprintVar = d.Val()
+				}
+				if d.NextArg() {
+					return d.ArgErr()
+				}
+				continue
+			case "site_key", "secret_key", "clearance_key", "clearance_ttl", "cookie_name", "verify_path":
+			default:
+				return d.Errf("unrecognized turnstile subdirective '%s'", sub)
+			}
+
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			val := d.Val()
+			if d.NextArg() {
+				return d.ArgErr()
+			}
+			switch sub {
+			case "site_key":
+				ts.SiteKey = val
+			case "secret_key":
+				ts.SecretKey = val
+			case "clearance_key":
+				ts.ClearanceKey = val
+			case "clearance_ttl":
+				dur, err := caddy.ParseDuration(val)
+				if err != nil {
+					return d.Errf("bad clearance_ttl %q: %v", val, err)
+				}
+				ts.ClearanceTTL = caddy.Duration(dur)
+			case "cookie_name":
+				ts.CookieName = val
+			case "verify_path":
+				ts.VerifyPath = val
 			}
 		}
 	}

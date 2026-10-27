@@ -119,7 +119,7 @@ func (s *quicSniffer) add(key string, in quicInitial) {
 	if err != nil {
 		return
 	}
-	s.store.set(key, hello.ja4(transportQUIC))
+	s.store.setPair(key, hello.ja4(transportQUIC), hello.ja4Bind(transportQUIC))
 }
 
 func (s *quicSniffer) sweepPendingLocked(now time.Time) {

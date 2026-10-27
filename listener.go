@@ -120,7 +120,7 @@ func (l *ja4Listener) Accept() (net.Conn, error) {
 	return &trackedConn{
 		Conn:   conn,
 		reader: bufio.NewReaderSize(conn, l.max),
-		addr:   normalizeAddr(conn.RemoteAddr().String()),
+		addr:   tcpConnectionKey(conn.RemoteAddr().String(), conn.LocalAddr().String()),
 		max:    l.max,
 		logger: l.logger,
 	}, nil
@@ -197,7 +197,7 @@ func (c *trackedConn) sniff() {
 		}
 
 		fingerprint := hello.ja4(transportTCP)
-		conns.set(c.addr, fingerprint)
+		conns.setPair(c.addr, fingerprint, hello.ja4Bind(transportTCP))
 		c.debug("computed ja4", zap.String("remote_addr", c.addr), zap.String("ja4", fingerprint))
 		return
 	}

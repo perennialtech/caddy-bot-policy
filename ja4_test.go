@@ -199,3 +199,27 @@ func TestJA4QUICTransportPrefix(t *testing.T) {
 		t.Errorf("ja4(quic) = %q, want a leading 'q'", got)
 	}
 }
+
+func TestJA4BindingIgnoresResumptionOnlyExtensions(t *testing.T) {
+	full := &clientHello{
+		legacyVersion: 0x0303, supportedVersions: []uint16{0x0304},
+		cipherSuites:  []uint16{0x1301, 0x1302},
+		extensions:    []uint16{extServerName, extSupportedVersions, extSignatureAlgorithms, extALPN, extPadding},
+		hasServerName: true, firstALPN: "h2", signatureAlgorithms: []uint16{0x0403, 0x0804},
+	}
+	resumed := *full
+	resumed.extensions = []uint16{extServerName, extSupportedVersions, extSignatureAlgorithms, extALPN, extPreSharedKey, extEarlyData}
+	for _, transport := range []byte{transportTCP, transportQUIC} {
+		if full.ja4(transport) == resumed.ja4(transport) {
+			t.Fatalf("%c: exact JA4 unexpectedly ignored changed extensions", transport)
+		}
+		if a, b := full.ja4Bind(transport), resumed.ja4Bind(transport); a != b {
+			t.Fatalf("%c: stable binding differs across resumption: %s vs %s", transport, a, b)
+		}
+		other := resumed
+		other.firstALPN = "http/1.1"
+		if other.ja4Bind(transport) == full.ja4Bind(transport) {
+			t.Fatalf("%c: binding should still distinguish ALPN profiles", transport)
+		}
+	}
+}

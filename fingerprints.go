@@ -12,29 +12,46 @@ import (
 // The listener wrapper and the HTTP handler are separate Caddy modules with
 // no reference to each other, and by the time the handler runs the raw
 // connection is buried under the TLS layer, so a process-wide table keyed by
-// remote address is what bridges them. The key is unique while it matters: a
-// TCP four-tuple cannot be reused while the connection is open, and entries
+// both TCP endpoints is what bridges them. Different local listeners can
+// receive connections from the same remote IP:port simultaneously. Entries
 // are dropped on Close.
 type fingerprintStore struct {
 	mu sync.RWMutex
-	m  map[string]string
+	m  map[string]fingerprints
+}
+
+type fingerprints struct {
+	ja4  string // spec-exact JA4 for the blocklist and logging
+	bind string // resumption-insensitive JA4 variant for clearances
 }
 
 // conns is the table shared by the ja4 listener wrapper and the ja4 handler.
-var conns = &fingerprintStore{m: make(map[string]string)}
+var conns = &fingerprintStore{m: make(map[string]fingerprints)}
 
 func (s *fingerprintStore) set(addr, fingerprint string) {
+	s.setPair(addr, fingerprint, "")
+}
+
+func (s *fingerprintStore) setPair(addr, fingerprint, bind string) {
 	if addr == "" || fingerprint == "" {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.m[addr] = fingerprint
+	s.m[addr] = fingerprints{ja4: fingerprint, bind: bind}
 }
 
 func (s *fingerprintStore) get(addr string) string {
+	return s.getPair(addr).ja4
+}
+
+func (s *fingerprintStore) getBind(addr string) string {
+	return s.getPair(addr).bind
+}
+
+func (s *fingerprintStore) getPair(addr string) fingerprints {
 	if addr == "" {
-		return ""
+		return fingerprints{}
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -72,6 +89,14 @@ func normalizeAddr(addr string) string {
 	return net.JoinHostPort(host, port)
 }
 
+// tcpConnectionKey disambiguates connections to different local listeners.
+func tcpConnectionKey(remote, local string) string {
+	if remote == "" || local == "" {
+		return ""
+	}
+	return normalizeAddr(remote) + "|" + normalizeAddr(local)
+}
+
 // idleStore maps a QUIC client address to the JA4 of its ClientHello.
 //
 // Unlike TCP there is no per-connection Close to hook: the packet conn sees
@@ -90,8 +115,8 @@ type idleStore struct {
 }
 
 type idleEntry struct {
-	fingerprint string
-	seen        time.Time
+	fingerprints
+	seen time.Time
 }
 
 func newIdleStore(ttl time.Duration, max int) *idleStore {
@@ -109,6 +134,10 @@ func newIdleStore(ttl time.Duration, max int) *idleStore {
 var quicConns = newIdleStore(time.Hour, 100_000)
 
 func (s *idleStore) set(addr, fingerprint string) {
+	s.setPair(addr, fingerprint, "")
+}
+
+func (s *idleStore) setPair(addr, fingerprint, bind string) {
 	if addr == "" || fingerprint == "" {
 		return
 	}
@@ -123,27 +152,35 @@ func (s *idleStore) set(addr, fingerprint string) {
 	if _, exists := s.m[addr]; !exists && len(s.m) >= s.max {
 		return // full of live connections: fail open rather than evict them
 	}
-	s.m[addr] = idleEntry{fingerprint: fingerprint, seen: now}
+	s.m[addr] = idleEntry{fingerprints: fingerprints{ja4: fingerprint, bind: bind}, seen: now}
 }
 
 func (s *idleStore) get(addr string) string {
+	return s.getPair(addr).ja4
+}
+
+func (s *idleStore) getBind(addr string) string {
+	return s.getPair(addr).bind
+}
+
+func (s *idleStore) getPair(addr string) fingerprints {
 	if addr == "" {
-		return ""
+		return fingerprints{}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	e, ok := s.m[addr]
 	if !ok {
-		return ""
+		return fingerprints{}
 	}
 	now := s.now()
 	if now.Sub(e.seen) > s.ttl {
 		delete(s.m, addr)
-		return ""
+		return fingerprints{}
 	}
 	e.seen = now
 	s.m[addr] = e
-	return e.fingerprint
+	return e.fingerprints
 }
 
 func (s *idleStore) delete(addr string) {

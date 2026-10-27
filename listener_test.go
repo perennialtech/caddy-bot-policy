@@ -29,7 +29,7 @@ func TestListenerFingerprintsRealHandshake(t *testing.T) {
 	})
 	defer server.close()
 
-	key := normalizeAddr(clientConn.LocalAddr().String())
+	key := tcpConnectionKey(clientConn.LocalAddr().String(), clientConn.RemoteAddr().String())
 	fingerprint := conns.get(key)
 	if fingerprint == "" {
 		t.Fatal("no fingerprint recorded for the connection")
@@ -66,7 +66,7 @@ func TestListenerFingerprintsRealHandshake(t *testing.T) {
 	})
 	defer server2.close()
 
-	if second := conns.get(normalizeAddr(clientConn2.LocalAddr().String())); second != fingerprint {
+	if second := conns.get(tcpConnectionKey(clientConn2.LocalAddr().String(), clientConn2.RemoteAddr().String())); second != fingerprint {
 		t.Errorf("second handshake produced %q, want %q — fingerprint is not stable", second, fingerprint)
 	}
 }
@@ -82,7 +82,7 @@ func TestListenerFingerprintVariesWithClient(t *testing.T) {
 		MinVersion:         tls.VersionTLS13,
 	})
 	defer server.close()
-	withH2 := conns.get(normalizeAddr(conn.LocalAddr().String()))
+	withH2 := conns.get(tcpConnectionKey(conn.LocalAddr().String(), conn.RemoteAddr().String()))
 
 	server2, conn2 := handshake(t, &tls.Config{
 		InsecureSkipVerify: true,
@@ -91,7 +91,7 @@ func TestListenerFingerprintVariesWithClient(t *testing.T) {
 		MaxVersion:         tls.VersionTLS12,
 	})
 	defer server2.close()
-	withHTTP11 := conns.get(normalizeAddr(conn2.LocalAddr().String()))
+	withHTTP11 := conns.get(tcpConnectionKey(conn2.LocalAddr().String(), conn2.RemoteAddr().String()))
 
 	if withH2 == "" || withHTTP11 == "" {
 		t.Fatalf("missing fingerprint: h2=%q http/1.1=%q", withH2, withHTTP11)
@@ -113,7 +113,7 @@ func TestListenerEvictsOnClose(t *testing.T) {
 		MinVersion:         tls.VersionTLS13,
 	})
 
-	key := normalizeAddr(clientConn.LocalAddr().String())
+	key := tcpConnectionKey(clientConn.LocalAddr().String(), clientConn.RemoteAddr().String())
 	if conns.get(key) == "" {
 		t.Fatal("no fingerprint recorded for the connection")
 	}
@@ -179,7 +179,7 @@ func TestListenerPassesThroughPlaintext(t *testing.T) {
 		t.Fatal("timed out waiting for the plaintext request")
 	}
 
-	if fingerprint := conns.get(normalizeAddr(conn.LocalAddr().String())); fingerprint != "" {
+	if fingerprint := conns.get(tcpConnectionKey(conn.LocalAddr().String(), conn.RemoteAddr().String())); fingerprint != "" {
 		t.Errorf("plaintext connection produced fingerprint %q, want none", fingerprint)
 	}
 }

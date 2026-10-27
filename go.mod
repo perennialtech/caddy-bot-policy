@@ -1,4 +1,4 @@
-module github.com/carbans/caddy-bot-policy
+module github.com/perennialtech/caddy-bot-policy
 
 go 1.25.1
 

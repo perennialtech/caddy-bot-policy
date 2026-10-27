@@ -191,8 +191,14 @@ and it emits `ht` instead of `h1` for the `http/1.1` ALPN.
 ## Build
 
 ```sh
-xcaddy build --with github.com/carbans/caddy-bot-policy
+xcaddy build --with github.com/perennialtech/caddy-bot-policy
 ```
+
+This is a fork of
+[`carbans/caddy-bot-policy`](https://github.com/carbans/caddy-bot-policy)
+with its own module path, adding HTTP/3 support. Builds that used the
+upstream path need the new one; the Caddy module IDs and config are
+unchanged.
 
 The module IDs `caddy.listeners.ja4` and `http.handlers.ja4` are the same ones
 used by `github.com/matt-/caddy-ja4`, so **the two plugins cannot be built into

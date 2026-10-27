@@ -453,7 +453,7 @@ func TestTurnstileClearanceValidation(t *testing.T) {
 	if ts.validClearance(forged, req) {
 		t.Error("clearance with an edited issue time accepted")
 	}
-	for _, junk := range []string{"", "1", "1.2", "1." + strings.TrimPrefix(fresh, "2."), "3." + strings.TrimPrefix(fresh, "2."), fresh + "x", "2.abc." + parts[2]} {
+	for _, junk := range []string{"", "1", "1.2", "1." + strings.TrimPrefix(fresh, "3."), "2." + strings.TrimPrefix(fresh, "3."), "4." + strings.TrimPrefix(fresh, "3."), fresh + "x", "3.abc." + parts[2]} {
 		if ts.validClearance(junk, req) {
 			t.Errorf("junk clearance %q accepted", junk)
 		}
@@ -779,9 +779,9 @@ func TestTurnstileClearanceMACIsolatesPolicy(t *testing.T) {
 	const sharedKey = "shared-clearance-signing-key-32-bytes"
 	for _, bound := range []bool{false, true} {
 		t.Run(fmt.Sprintf("bound=%t", bound), func(t *testing.T) {
-			newPolicy := func(siteKey, secretKey, varName string) *Turnstile {
+			newPolicy := func(siteKey, secretKey, varName, cookieName string) *Turnstile {
 				t.Helper()
-				ts := &Turnstile{SiteKey: siteKey, SecretKey: secretKey, ClearanceKey: sharedKey, BindFingerprintVar: varName}
+				ts := &Turnstile{SiteKey: siteKey, SecretKey: secretKey, ClearanceKey: sharedKey, BindFingerprintVar: varName, CookieName: cookieName}
 				if err := ts.Provision(caddy.Context{}); err != nil {
 					t.Fatal(err)
 				}
@@ -791,8 +791,8 @@ func TestTurnstileClearanceMACIsolatesPolicy(t *testing.T) {
 			if bound {
 				varName, fp = "ja4", testFP
 			}
-			a := newPolicy("widget-a", "secret-a", varName)
-			b := newPolicy("widget-b", "secret-b", varName)
+			a := newPolicy("widget-a", "secret-a", varName, "")
+			b := newPolicy("widget-b", "secret-b", varName, "")
 			req := newTurnstileRequest(http.MethodGet, "/private", fp, nil)
 			signedByA := a.mintClearance(time.Now(), req)
 			if !a.validClearance(signedByA, req) {
@@ -808,14 +808,45 @@ func TestTurnstileClearanceMACIsolatesPolicy(t *testing.T) {
 			}
 			// A stable clearance_key intentionally survives Turnstile
 			// secret_key rotation for the *same* widget.
-			rotated := newPolicy("widget-a", "rotated-secret", varName)
+			rotated := newPolicy("widget-a", "rotated-secret", varName, "")
 			if !rotated.validClearance(signedByA, req) {
 				t.Error("secret_key rotation invalidated the existing clearance")
+			}
+			// Explicit cookie prefixes isolate policies even when every key,
+			// widget and binding setting is otherwise identical. The browser's
+			// cookie name is not part of the signed value sent by a client.
+			renamed := newPolicy("widget-a", "secret-a", varName, "route_b")
+			if a.cookieName(fp, bound) == renamed.cookieName(fp, bound) {
+				t.Fatal("different cookie prefixes share a cookie name")
+			}
+			if renamed.validClearance(signedByA, req) {
+				t.Error("different cookie prefix accepted a clearance value from policy A")
+			}
+			renameReq := newTurnstileRequest(http.MethodGet, "/private", fp, nil)
+			renameReq.AddCookie(&http.Cookie{Name: renamed.cookieName(fp, bound), Value: signedByA})
+			if rec, reached := serve(t, renamed, renameReq); rec.Code != http.StatusForbidden || reached {
+				t.Error("different cookie prefix accepted a transplanted clearance")
+			}
+			signedByRenamed := renamed.mintClearance(time.Now(), req)
+			if !renamed.validClearance(signedByRenamed, req) {
+				t.Error("renamed policy rejected its own clearance")
+			}
+			if a.validClearance(signedByRenamed, req) {
+				t.Error("policy A accepted a clearance signed for another cookie prefix")
+			}
+			originalReq := newTurnstileRequest(http.MethodGet, "/private", fp, nil)
+			originalReq.AddCookie(&http.Cookie{Name: a.cookieName(fp, bound), Value: signedByRenamed})
+			if rec, reached := serve(t, a, originalReq); rec.Code != http.StatusForbidden || reached {
+				t.Error("policy A accepted a transplanted clearance from a renamed policy")
+			}
+			renameRotated := newPolicy("widget-a", "rotated-secret", varName, "route_b")
+			if !renameRotated.validClearance(signedByRenamed, req) {
+				t.Error("secret_key rotation invalidated the renamed policy's clearance")
 			}
 			if bound {
 				// Same fingerprint under a different http.vars key also
 				// belongs to a different policy.
-				c := newPolicy("widget-a", "secret-a", "alternate")
+				c := newPolicy("widget-a", "secret-a", "alternate", "")
 				otherReq := newTurnstileRequest(http.MethodGet, "/private", fp, nil)
 				caddyhttp.SetVar(otherReq.Context(), "alternate", fp)
 				if c.validClearance(signedByA, otherReq) {

@@ -67,10 +67,10 @@ const (
 	// Cookie names must differ across signing configurations and, when
 	// binding is enabled, across complete fingerprints. Otherwise visiting
 	// one protected route/profile overwrites another route/profile's cookie.
-	clearanceCookieLabel = "caddy-bot-policy/turnstile/cookie/v2\x00"
-	// Version 2 signs the site key and fingerprint-variable identity as
-	// well as the host/fingerprint. Version 1 cookies are not accepted.
-	clearanceVersion = "2"
+	clearanceCookieLabel = "caddy-bot-policy/turnstile/cookie/v3\x00"
+	// Version 3 also authenticates the configured cookie prefix. Older
+	// clearances cannot cross into policies with a different cookie_name.
+	clearanceVersion = "3"
 )
 
 var varNamePattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
@@ -261,12 +261,14 @@ func writeMACField(mac hash.Hash, field string) {
 	mac.Write([]byte(field))
 }
 
-// writePolicyIdentity binds both the public widget key and the identity of
-// the fingerprint variable. It intentionally excludes the verification
-// secret: an explicit clearance_key can survive secret_key rotation.
+// writePolicyIdentity binds the widget, fingerprint variable and cookie
+// prefix to each signed clearance, so copying a value to another policy's
+// cookie name cannot bypass that policy. It excludes the verification secret
+// so an explicit clearance_key survives secret_key rotation.
 func (ts *Turnstile) writePolicyIdentity(mac hash.Hash) {
 	writeMACField(mac, ts.SiteKey)
 	writeMACField(mac, ts.BindFingerprintVar)
+	writeMACField(mac, ts.CookieName)
 }
 
 // cookieName isolates different protection configurations, and (when bound)

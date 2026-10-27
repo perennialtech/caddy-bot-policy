@@ -200,11 +200,11 @@ turnstile @browser {
 #### What a clearance is, and is not
 
 The clearance is a **stateless bearer token**: the cookie holds its issue
-time and an HMAC-SHA256 over that time, the policy identity (site key and
-fingerprint variable), the hostname and (if bound) the fingerprint. A
-clearance from another policy is rejected even if both policies deliberately
-share a `clearance_key` and a client copies the value to the other cookie
-name. There is no server-side store, so clearances survive restarts
+time and an HMAC-SHA256 over that time, the policy identity (site key,
+fingerprint variable and cookie prefix), the hostname and (if bound) the
+fingerprint. A clearance from another policy is rejected even if both
+policies deliberately share a `clearance_key` and a client copies the value
+to the other cookie name. There is no server-side store, so clearances survive restarts
 and work across several Caddy instances that share the same keys. It is
 worth being precise about what that buys:
 
@@ -239,8 +239,8 @@ and, when bound, the full fingerprint, so independent Turnstile policies
 on one host do not overwrite each other's clearances. Instances using the
 same signing key, site key, binding variable and cookie prefix intentionally
 share a cookie namespace. Cookie values themselves also authenticate the
-policy; the cookie name is not a trust boundary. Version-1 clearance cookies
-issued by previous builds are invalidated by this change and will trigger a
+policy; the cookie name is not a trust boundary. Version-1 and version-2
+clearances issued by previous builds are invalidated and will trigger a
 fresh challenge. Browsers do not separate cookies by port.
 
 #### Protecting the verification step

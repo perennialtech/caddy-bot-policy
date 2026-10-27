@@ -39,9 +39,8 @@ const minCaptureBytes = 1024
 //		}
 //	}
 //
-// Only TCP listeners pass through here, so HTTP/3 connections carry no
-// fingerprint; requests arriving over QUIC reach bot_policy with an empty
-// variable and are resolved by on_missing_fingerprint.
+// Only TCP listeners pass through here. HTTP/3 runs over UDP and is covered
+// by the ja4 packet conn wrapper (PacketConnWrapper) instead.
 type ListenerWrapper struct {
 	// MaxCaptureBytes is how many bytes may be buffered while waiting for the
 	// ClientHello. Defaults to 16384.

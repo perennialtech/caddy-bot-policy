@@ -1,10 +1,12 @@
 // Package botpolicy implements JA4 TLS client fingerprinting for Caddy and a
 // policy handler that blocks requests by fingerprint.
 //
-// It registers three modules:
+// It registers four modules:
 //
 //	caddy.listeners.ja4       listener wrapper that reads the ClientHello and
 //	                          computes the JA4 fingerprint
+//	caddy.packetconns.ja4     packet conn wrapper that does the same for QUIC
+//	                          (HTTP/3) from Initial packets
 //	http.handlers.ja4         publishes that fingerprint as a request variable
 //	http.handlers.bot_policy  blocks requests whose fingerprint is blocklisted
 //
@@ -44,6 +46,7 @@ const defaultVarName = "ja4"
 
 func init() {
 	caddy.RegisterModule(ListenerWrapper{})
+	caddy.RegisterModule(PacketConnWrapper{})
 	caddy.RegisterModule(Handler{})
 	caddy.RegisterModule(BotPolicy{})
 

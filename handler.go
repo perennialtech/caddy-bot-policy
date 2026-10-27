@@ -22,8 +22,9 @@ import (
 //		var_name ja4
 //	}
 //
-// The listener wrapper must be configured too — see ListenerWrapper. Without
-// it the variable is simply never set.
+// The listener wrapper must be configured too — see ListenerWrapper — and,
+// for HTTP/3, the packet conn wrapper (PacketConnWrapper). Without them the
+// variable is simply never set.
 type Handler struct {
 	// VarName is the http.vars.* key to publish the fingerprint under.
 	// Defaults to "ja4", making it available as {http.vars.ja4}.
@@ -55,7 +56,13 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 // it to the empty string, so that {http.vars.ja4} renders as empty in logs
 // and bot_policy sees the same "missing" case either way.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
-	if fingerprint := conns.get(normalizeAddr(r.RemoteAddr)); fingerprint != "" {
+	store := conns.get
+	if r.ProtoMajor == 3 {
+		// HTTP/3: RemoteAddr is the client's UDP address, recorded by the
+		// ja4 packet conn wrapper from the QUIC Initial packets.
+		store = quicConns.get
+	}
+	if fingerprint := store(normalizeAddr(r.RemoteAddr)); fingerprint != "" {
 		caddyhttp.SetVar(r.Context(), h.VarName, fingerprint)
 	}
 	return next.ServeHTTP(w, r)

@@ -63,6 +63,10 @@ const (
 	// clearanceKeyLabel separates the HMAC key derived from the Turnstile
 	// secret from any other use of that secret.
 	clearanceKeyLabel = "caddy-bot-policy/turnstile/clearance/v1"
+	// Cookie names must differ across signing configurations and, when
+	// binding is enabled, across complete fingerprints. Otherwise visiting
+	// one protected route/profile overwrites another route/profile's cookie.
+	clearanceCookieLabel = "caddy-bot-policy/turnstile/cookie/v1\x00"
 )
 
 var varNamePattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
@@ -112,9 +116,9 @@ type Turnstile struct {
 	// Defaults to 30 days; must be between one minute and 400 days.
 	ClearanceTTL caddy.Duration `json:"clearance_ttl,omitempty"`
 
-	// CookieName is the name of the clearance cookie. Defaults to
-	// "bp_clearance". With fingerprint binding, a suffix naming the
-	// transport is appended ("bp_clearance_t", "bp_clearance_q").
+	// CookieName is the prefix of the clearance cookie name. The final name
+	// also carries a stable, keyed namespace for this configuration and,
+	// when binding is enabled, the complete fingerprint.
 	CookieName string `json:"cookie_name,omitempty"`
 
 	// BindFingerprintVar, if set, names the http.vars.* key holding the
@@ -188,12 +192,9 @@ func (ts *Turnstile) Provision(ctx caddy.Context) error {
 	if ts.CookieName == "" {
 		ts.CookieName = defaultClearanceCookie
 	}
-	// The transport suffix is checked too, since that is the name actually
-	// sent when binding is on.
-	for _, name := range []string{ts.CookieName, ts.CookieName + "_t"} {
-		if err := (&http.Cookie{Name: name, Value: "x"}).Valid(); err != nil {
-			return fmt.Errorf("turnstile: invalid cookie_name %q: %v", ts.CookieName, err)
-		}
+	// The generated suffix uses only cookie-safe base64url characters.
+	if err := (&http.Cookie{Name: ts.CookieName, Value: "x"}).Valid(); err != nil {
+		return fmt.Errorf("turnstile: invalid cookie_name %q: %v", ts.CookieName, err)
 	}
 
 	if ts.BindFingerprintVar != "" && !varNamePattern.MatchString(ts.BindFingerprintVar) {
@@ -243,19 +244,24 @@ func (ts *Turnstile) fingerprint(r *http.Request) (string, bool) {
 	return fp, true
 }
 
-// cookieName is the clearance cookie used for r. With binding on, each
-// transport gets its own cookie: a browser has a different JA4 over TCP
-// (t...) and QUIC (q...), and one shared cookie would be overwritten on every
-// switch between HTTP/2 and HTTP/3, re-challenging the visitor each time.
+// cookieName isolates different protection configurations, and (when bound)
+// every distinct JA4, not just the transport. This prevents browsers that
+// alternate TLS/ALPN profiles or protected routes from overwriting their
+// previously solved clearances. Keyed names don't disclose the fingerprint.
 func (ts *Turnstile) cookieName(fp string, bound bool) string {
-	if !bound {
-		return ts.CookieName
+	mac := hmac.New(sha256.New, ts.key)
+	mac.Write([]byte(clearanceCookieLabel))
+	mac.Write([]byte(ts.SiteKey))
+	mac.Write([]byte{0})
+	if bound {
+		mac.Write([]byte("bound\x00"))
+		mac.Write([]byte(ts.BindFingerprintVar))
+		mac.Write([]byte{0})
+		mac.Write([]byte(fp))
+	} else {
+		mac.Write([]byte("unbound"))
 	}
-	transport := "x"
-	if c := fp[0]; c >= 'a' && c <= 'z' {
-		transport = string(c)
-	}
-	return ts.CookieName + "_" + transport
+	return ts.CookieName + "_" + base64.RawURLEncoding.EncodeToString(mac.Sum(nil)[:16])
 }
 
 func (ts *Turnstile) cleared(r *http.Request) bool {

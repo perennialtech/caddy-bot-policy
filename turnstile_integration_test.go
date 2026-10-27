@@ -347,3 +347,123 @@ func TestIntegrationDirectiveOrder(t *testing.T) {
 		last = i
 	}
 }
+
+// Verification is a POST back to the protected URL. A GET-only method
+// matcher challenges the page but cannot receive its own verification.
+func TestIntegrationMethodMatchersForVerification(t *testing.T) {
+	for _, tc := range []struct {
+		name, methods string
+		works         bool
+	}{
+		{"GET only", "GET", false},
+		{"GET and POST", "GET POST", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := integrationFake(t)
+			base := startCaddy(t, `
+	@pages {
+		path /members/*
+		method `+tc.methods+`
+	}
+	turnstile @pages {
+		site_key `+testSiteKey+`
+		secret_key `+testSecretKey+`
+	}
+	respond "app"`)
+
+			v := newVisitor(t, base)
+			resp, body := v.get("/members/home")
+			if resp.StatusCode != http.StatusForbidden || !strings.Contains(body, "cf-turnstile") {
+				t.Fatalf("GET: got %d, expected a challenge", resp.StatusCode)
+			}
+			resp, _ = v.post("/members/home", solve("good"))
+			if tc.works {
+				if resp.StatusCode != http.StatusSeeOther || f.calls.Load() != 1 {
+					t.Fatalf("POST: got %d, verify calls %d, expected 303 and one verification", resp.StatusCode, f.calls.Load())
+				}
+				resp, body = v.get("/members/home")
+				if resp.StatusCode != http.StatusOK || body != "app" {
+					t.Errorf("GET after clearance: got %d %q", resp.StatusCode, body)
+				}
+			} else {
+				if resp.StatusCode == http.StatusSeeOther || f.calls.Load() != 0 {
+					t.Fatalf("GET-only matcher unexpectedly verified: status=%d calls=%d", resp.StatusCode, f.calls.Load())
+				}
+				resp, body = v.get("/members/home")
+				if resp.StatusCode != http.StatusForbidden || !strings.Contains(body, "cf-turnstile") {
+					t.Errorf("GET after bypassed POST: got %d %q; expected another challenge", resp.StatusCode, body)
+				}
+			}
+		})
+	}
+}
+
+// Operators using bind_fingerprint with HTTP/3 migration need an h1/h2-only
+// deployment option; verify the documented Caddy global protocols syntax.
+func TestIntegrationHTTP3DisabledConfig(t *testing.T) {
+	cfg := `{
+		servers {
+			protocols h1 h2
+			listener_wrappers {
+				ja4
+				tls
+			}
+		}
+	}
+	example.com {
+		ja4
+		turnstile {
+			site_key ` + testSiteKey + `
+			secret_key ` + testSecretKey + `
+			bind_fingerprint
+		}
+		respond "app"
+	}`
+	adapted, _, err := caddyfile.Adapter{ServerType: httpcaddyfile.ServerType{}}.Adapt([]byte(cfg), nil)
+	if err != nil {
+		t.Fatalf("h1/h2 fallback does not adapt: %v", err)
+	}
+	if !strings.Contains(string(adapted), `"protocols":["h1","h2"]`) {
+		t.Errorf("h1/h2 fallback did not disable h3: %s", adapted)
+	}
+}
+
+// A browser visits two separately configured, path-scoped Turnstile handlers
+// on the same hostname and keeps both cookies without any overwrites.
+func TestIntegrationIndependentProtectedRoutes(t *testing.T) {
+	f := integrationFake(t)
+	base := startCaddy(t, `
+	handle /alpha/* {
+		turnstile {
+			site_key `+testSiteKey+`
+			secret_key `+testSecretKey+`
+			clearance_key `+strings.Repeat("a", 32)+`
+		}
+		respond "alpha"
+	}
+	handle /beta/* {
+		turnstile {
+			site_key `+testSiteKey+`
+			secret_key `+testSecretKey+`
+			clearance_key `+strings.Repeat("b", 32)+`
+		}
+		respond "beta"
+	}`)
+	v := newVisitor(t, base)
+	if got := v.pass("/alpha/a"); got != "alpha" {
+		t.Errorf("alpha: %q", got)
+	}
+	f.redeemed.Store(false)
+	if got := v.pass("/beta/b"); got != "beta" {
+		t.Errorf("beta: %q", got)
+	}
+	if len(v.cookies) != 2 || v.cookies[0].Name == v.cookies[1].Name {
+		t.Fatalf("two independent policies must give two cookie slots: %v", v.cookies)
+	}
+	for _, tc := range []struct{ path, want string }{{"/alpha/a", "alpha"}, {"/beta/b", "beta"}, {"/alpha/a", "alpha"}} {
+		resp, body := v.get(tc.path)
+		if resp.StatusCode != http.StatusOK || body != tc.want {
+			t.Errorf("revisit %s: got %d %q", tc.path, resp.StatusCode, body)
+		}
+	}
+}

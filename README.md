@@ -149,6 +149,12 @@ and a `rewrite` or `try_files` in front of it changes both requests the same
 way. The form action and the redirect always use the URL as the visitor sent
 it, before any rewrite or `handle_path` prefix stripping.
 
+**Matchers must admit verification POSTs.** Do not scope `turnstile` with
+`method GET` alone, or place it inside a GET-only `handle`/`route`: the GET
+would show a challenge, but its POST would miss the verifier. For a
+method-restricted route, use `method GET POST` alongside the path matcher,
+or place `turnstile` before the method-specific routing.
+
 Combined with the blocklist, known-bad fingerprints are refused outright and
 everyone else is challenged once a month:
 
@@ -219,8 +225,11 @@ solver sharing its clearance with others. If that matters, shorten
 Expiry is checked against the issue time and the TTL configured *now*, so
 shortening `clearance_ttl` applies to existing cookies straight away. The
 cookie is `HttpOnly`, `SameSite=Lax`, `Secure` over HTTPS, and host-only.
-Browsers do not separate cookies by port, so sites on different ports of the
-same hostname that share keys also share clearances.
+The cookie name has a keyed suffix derived from the signing configuration
+and, when bound, the full fingerprint, so independent Turnstile policies
+on one host do not overwrite each other's clearances. Instances using the
+same signing key, site key, binding variable and cookie prefix intentionally
+share a cookie namespace. Browsers do not separate cookies by port.
 
 #### Protecting the verification step
 
@@ -234,6 +243,33 @@ flood can tie up, but it is not a rate limit. For production, limit POSTs
 per client in front of it, for example with
 [`caddy-ratelimit`](https://github.com/mholt/caddy-ratelimit) on `method
 POST`, or with your load balancer or firewall.
+
+For Caddy built with `github.com/mholt/caddy-ratelimit`, put a per-client
+POST budget *before* `turnstile` in a `route` block, where directive order is
+explicit:
+
+```caddyfile
+example.com {
+    @posts method POST
+    route {
+        rate_limit @posts {
+            zone verification_posts {
+                key    {client_ip}
+                window 1m
+                events 60
+            }
+        }
+        turnstile {
+            site_key   {env.TURNSTILE_SITE_KEY}
+            secret_key {env.TURNSTILE_SECRET_KEY}
+        }
+        reverse_proxy localhost:8080
+    }
+}
+```
+
+This limits *all* POSTs on the site, not just Turnstile submissions; scope
+the matcher to protected paths and tune the budget for actual traffic.
 
 #### Content Security Policy
 
@@ -281,7 +317,7 @@ challenged paths, or make sure they allow the above.
 | `secret_key` | Turnstile secret key | Required. `{env.*}` placeholders are expanded when the config loads, so the secret need not appear in the Caddyfile. |
 | `clearance_ttl` | duration (default `30d`) | How long a clearance stays valid after it is issued. Between `1m` and `400d` (the longest browsers keep a cookie). |
 | `clearance_key` | string of at least 32 bytes | Optional. Key that signs the cookie. By default one is derived from `secret_key`, which means **rotating the Turnstile secret invalidates every clearance**. Set this to rotate them independently. |
-| `cookie_name` | cookie name (default `bp_clearance`) | Name of the clearance cookie. With `bind_fingerprint`, a transport suffix is appended (see below). Validated when the config loads. |
+| `cookie_name` | cookie prefix (default `bp_clearance`) | Prefix for a cookie name with a keyed configuration suffix and, when bound, a full-fingerprint suffix. Validated when the config loads. |
 | `bind_fingerprint` | `[var_name]` (default `ja4`) | Ties the clearance to the client's JA4 fingerprint, read from `http.vars.<var_name>`. See below. |
 | `max_pending_verifications` | integer (default `64`) | Most siteverify calls this handler has in flight at once. See [Protecting the verification step](#protecting-the-verification-step). |
 
@@ -302,14 +338,10 @@ packet conn wrapper is missing, or when `var_name` does not match the `ja4`
 handler's. Without the requirement, a configuration mistake would quietly
 produce clearances that bind to nothing.
 
-**HTTP/2 and HTTP/3 get separate cookies.** The same browser has a different
-JA4 over TCP (`t…`) and QUIC (`q…`), and a browser typically starts on h2 and
-moves to h3 after seeing `Alt-Svc`, sometimes falling back again. One shared
-cookie would be overwritten on every switch, re-challenging the visitor each
-time. Instead the cookie name carries the transport (`bp_clearance_t`,
-`bp_clearance_q`), so a visitor solves at most once per transport, and both
-clearances then hold for the TTL. A browser update that changes the
-fingerprint also means one more challenge.
+**Each JA4 gets its own cookie.** This covers HTTP/2 versus HTTP/3 as well
+as multiple TLS/ALPN profiles on TCP. Changing fingerprints requires another
+solve, but revisiting an already-cleared fingerprint reuses its own cookie.
+Cookie names begin with `bp_clearance_` unless `cookie_name` is customised.
 
 ### `ja4` subdirectives
 
@@ -342,6 +374,28 @@ Both wrappers accept the same option:
   address the handshake came from. If a client migrates to a new address
   mid-connection (switching networks, NAT rebinding), its later requests
   arrive without a fingerprint and fall to `on_missing_fingerprint`.
+  With **`turnstile bind_fingerprint`**, even an already-cleared visitor
+  cannot use the migrated connection: its cookie is rejected and another
+  solve cannot complete because the POST lacks a fingerprint. The user must
+  establish a new QUIC connection. Until migration is supported, the
+  operational fallback is to disable HTTP/3 for Caddy servers using bound
+  Turnstile:
+
+  ```caddyfile
+  {
+      servers {
+          protocols h1 h2
+          listener_wrappers {
+              ja4
+              tls
+          }
+      }
+  }
+  ```
+
+  This setting is server-wide; the HTTP/3 packet conn wrapper is unnecessary
+  with h3 disabled. Keep binding enabled rather than silently accepting
+  unbound clearances.
 - **UDP source addresses can be spoofed.** Initial packets are encrypted
   with keys anyone can derive, so an attacker who knows a client's exact
   address and port — in practice, one on the network path — could send a

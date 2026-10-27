@@ -42,7 +42,7 @@ with sync_playwright() as p:
     check(not [m for m in console if "Content Security Policy" in m], "no CSP violations under a strict site policy")
 
     cookies = [c for c in ctx.cookies(PASS) if c["name"].startswith("bp_clearance")]
-    check([c["name"] for c in cookies] == ["bp_clearance_t"], "one TCP-bound clearance cookie")
+    check(len(cookies) == 1 and cookies[0]["name"].startswith("bp_clearance_"), "one fingerprint-bound clearance cookie")
     c = cookies[0]
     check(c["httpOnly"] and c["secure"] and c["sameSite"] == "Lax", "cookie attributes")
     days = (c["expires"] - time.time()) / 86400

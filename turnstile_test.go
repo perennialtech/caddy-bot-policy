@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -180,7 +181,7 @@ func TestTurnstileFullFlow(t *testing.T) {
 	if loc := rec.Header().Get("Location"); loc != "/articles?page=2&sort=new" {
 		t.Errorf("verify redirected to %q, want the original page", loc)
 	}
-	c := cookieFrom(rec, defaultClearanceCookie)
+	c := cookieFrom(rec, ts.cookieName("", false))
 	if c == nil {
 		t.Fatal("verify did not set a clearance cookie")
 	}
@@ -513,8 +514,8 @@ func TestTurnstileFingerprintBinding(t *testing.T) {
 	ts := newTestTurnstile(t, true)
 
 	c := clearOnce(t, ts, testFP)
-	if c.Name != defaultClearanceCookie+"_t" {
-		t.Errorf("bound cookie over TCP is named %q, want %q", c.Name, defaultClearanceCookie+"_t")
+	if c.Name != ts.cookieName(testFP, true) {
+		t.Errorf("bound cookie over TCP is named %q, want %q", c.Name, ts.cookieName(testFP, true))
 	}
 	if !passes(t, ts, testFP, c) {
 		t.Error("bound clearance rejected for the client it was issued to")
@@ -691,5 +692,134 @@ func TestTurnstileProvisionExpandsEnv(t *testing.T) {
 	}
 	if ts.SecretKey != testSecretKey {
 		t.Errorf("secret_key not expanded: %q", ts.SecretKey)
+	}
+}
+
+// Different TCP ClientHellos (such as h2 versus h1-only) must not replace
+// each other's clearance in a browser's cookie jar.
+func TestTurnstileBindingSurvivesTCPProfileSwitching(t *testing.T) {
+	f := &fakeSiteverify{hostname: testHost, action: turnstileAction}
+	useSiteverify(t, f)
+	ts := newTestTurnstile(t, true)
+	const otherTCP = "t13d1311h1_e8f1e7e78f70_d339722ba4af"
+
+	a := clearOnce(t, ts, testFP)
+	f.redeemed.Store(false)
+	b := clearOnce(t, ts, otherTCP)
+	if a.Name == b.Name {
+		t.Fatalf("different TCP JA4s share cookie name %q", a.Name)
+	}
+	for i, fp := range []string{testFP, otherTCP, testFP, otherTCP} {
+		if !passes(t, ts, fp, a, b) {
+			t.Errorf("profile switch %d: clearance lost", i)
+		}
+	}
+}
+
+// Two independent path-scoped policies on the same host must not overwrite
+// each other's cookies, with or without JA4 binding.
+func TestTurnstileCookieNamesIsolateConfigurations(t *testing.T) {
+	for _, bound := range []bool{false, true} {
+		t.Run(fmt.Sprintf("bound=%t", bound), func(t *testing.T) {
+			f := &fakeSiteverify{hostname: testHost, action: turnstileAction}
+			useSiteverify(t, f)
+			a := newTestTurnstile(t, bound)
+			b := &Turnstile{SiteKey: testSiteKey, SecretKey: testSecretKey, ClearanceKey: strings.Repeat("b", 32)}
+			if bound {
+				b.BindFingerprintVar = "ja4"
+			}
+			if err := b.Provision(caddy.Context{}); err != nil {
+				t.Fatal(err)
+			}
+			fp := ""
+			if bound {
+				fp = testFP
+			}
+			ca := clearOnce(t, a, fp)
+			f.redeemed.Store(false)
+			cb := clearOnce(t, b, fp)
+			if ca.Name == cb.Name {
+				t.Fatalf("different signing keys share cookie %q", ca.Name)
+			}
+			for i, ts := range []*Turnstile{a, b, a, b} {
+				if !passes(t, ts, fp, ca, cb) {
+					t.Errorf("policy switch %d: clearance lost", i)
+				}
+			}
+			// Identical instances must agree on cookie names and MACs.
+			clone := newTestTurnstile(t, bound)
+			if clone.cookieName(fp, bound) != ca.Name || !passes(t, clone, fp, ca, cb) {
+				t.Error("clearance was not stable across identical instances")
+			}
+			differentWidget := newTestTurnstile(t, bound)
+			differentWidget.SiteKey = "another-widget-key"
+			if differentWidget.cookieName(fp, bound) == ca.Name {
+				t.Error("different site keys share a cookie slot")
+			}
+			differentSecret := &Turnstile{SiteKey: testSiteKey, SecretKey: "another-secret"}
+			if bound {
+				differentSecret.BindFingerprintVar = "ja4"
+			}
+			if err := differentSecret.Provision(caddy.Context{}); err != nil {
+				t.Fatal(err)
+			}
+			if differentSecret.cookieName(fp, bound) == ca.Name {
+				t.Error("different default-derived signing keys share a cookie slot")
+			}
+		})
+	}
+}
+
+// A migrated HTTP/3 connection retains its TLS handshake but changes UDP
+// source address. The packet sniffer cannot link it to the original Initial.
+// Verify that Turnstile fails closed rather than granting an unbound cookie.
+func TestTurnstileQUICMigrationFailsClosed(t *testing.T) {
+	f := newFake(t, testHost, turnstileAction)
+	ts := newTestTurnstile(t, true)
+	h := &Handler{VarName: "ja4"}
+	const oldAddr = "192.0.2.11:41000"
+	const newAddr = "192.0.2.12:41001"
+	quicConns.set(normalizeAddr(oldAddr), testFPQUIC)
+	defer quicConns.delete(normalizeAddr(oldAddr))
+
+	request := func(method, addr string, body url.Values, cookie *http.Cookie) *http.Request {
+		r := newTurnstileRequest(method, "/members", "", body)
+		r.Proto, r.ProtoMajor, r.ProtoMinor, r.RemoteAddr = "HTTP/3.0", 3, 0, addr
+		if cookie != nil {
+			r.AddCookie(cookie)
+		}
+		return r
+	}
+	serveThroughJA4 := func(r *http.Request) (*httptest.ResponseRecorder, bool) {
+		t.Helper()
+		var reached bool
+		w := httptest.NewRecorder()
+		next := caddyhttp.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) error {
+			reached = true
+			w.WriteHeader(http.StatusOK)
+			return nil
+		})
+		if err := h.ServeHTTP(w, r, caddyhttp.HandlerFunc(func(w http.ResponseWriter, r *http.Request) error {
+			return ts.ServeHTTP(w, r, next)
+		})); err != nil {
+			t.Fatal(err)
+		}
+		return w, reached
+	}
+
+	// A valid bound cookie is accepted on the original connection address.
+	issued := ts.mintClearance(time.Now(), newTurnstileRequest(http.MethodGet, "/members", testFPQUIC, nil))
+	cookie := &http.Cookie{Name: ts.cookieName(testFPQUIC, true), Value: issued}
+	if rec, reached := serveThroughJA4(request(http.MethodGet, oldAddr, nil, cookie)); rec.Code != http.StatusOK || !reached {
+		t.Fatalf("initial address: %d, reached=%t", rec.Code, reached)
+	}
+	if rec, reached := serveThroughJA4(request(http.MethodGet, newAddr, nil, cookie)); rec.Code != http.StatusForbidden || reached {
+		t.Fatalf("migrated address: %d, reached=%t; expected a challenge", rec.Code, reached)
+	}
+	if rec, reached := serveThroughJA4(request(http.MethodPost, newAddr, solve("good"), cookie)); rec.Code != http.StatusForbidden || reached || anyCookie(rec) {
+		t.Fatalf("migrated verification: %d, reached=%t, cookies=%v", rec.Code, reached, rec.Result().Cookies())
+	}
+	if got := f.calls.Load(); got != 0 {
+		t.Errorf("siteverify was called %d times on an unbindable connection", got)
 	}
 }

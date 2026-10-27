@@ -1,7 +1,9 @@
 package botpolicy
 
 import (
+	"context"
 	"errors"
+	"net"
 	"net/http"
 
 	"github.com/caddyserver/caddy/v2"
@@ -10,6 +12,16 @@ import (
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"go.uber.org/zap"
 )
+
+// observedFingerprint is a trusted, package-private per-request value. Caddy
+// request variables can be written by arbitrary other directives, so they
+// must not be the authority for bound clearance verification.
+type observedFingerprint struct {
+	exactName, bindName string
+	exact, bind         string
+}
+
+type observedFingerprintKey struct{}
 
 // Handler publishes the JA4 fingerprint captured by the ja4 listener wrapper
 // into a request variable, so that it can be read by bot_policy, matched on,
@@ -62,23 +74,26 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 
 // ServeHTTP implements caddyhttp.MiddlewareHandler.
 //
-// A request with no fingerprint leaves the variable unset rather than setting
-// it to the empty string, so that {http.vars.ja4} renders as empty in logs
-// and bot_policy sees the same "missing" case either way.
+// Always overwrite both fingerprint variables, including when the listener
+// could not observe a ClientHello. This prevents earlier request-derived vars
+// from being mistaken for a trusted wire fingerprint.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
 	store := conns.getPair
+	key := ""
 	if r.ProtoMajor == 3 {
-		// HTTP/3: RemoteAddr is the client's UDP address, recorded by the
-		// ja4 packet conn wrapper from the QUIC Initial packets.
+		// The QUIC sniffer records Initial packets by UDP source address.
 		store = quicConns.getPair
+		key = normalizeAddr(r.RemoteAddr)
+	} else if local, ok := r.Context().Value(http.LocalAddrContextKey).(net.Addr); ok {
+		key = tcpConnectionKey(r.RemoteAddr, local.String())
 	}
-	fp := store(normalizeAddr(r.RemoteAddr))
-	if fp.ja4 != "" {
-		caddyhttp.SetVar(r.Context(), h.VarName, fp.ja4)
-	}
-	if fp.bind != "" {
-		caddyhttp.SetVar(r.Context(), h.BindVarName, fp.bind)
-	}
+	fp := store(key)
+	// Clear preexisting vars even when no ClientHello was captured.
+	caddyhttp.SetVar(r.Context(), h.VarName, fp.ja4)
+	caddyhttp.SetVar(r.Context(), h.BindVarName, fp.bind)
+	r = r.WithContext(context.WithValue(r.Context(), observedFingerprintKey{}, observedFingerprint{
+		exactName: h.VarName, bindName: h.BindVarName, exact: fp.ja4, bind: fp.bind,
+	}))
 	return next.ServeHTTP(w, r)
 }
 

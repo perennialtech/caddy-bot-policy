@@ -467,3 +467,61 @@ func TestIntegrationIndependentProtectedRoutes(t *testing.T) {
 		}
 	}
 }
+
+// A Caddy vars directive is allowed to read arbitrary request headers, but it
+// cannot promote those bytes into a trusted JA4 when the TCP listener wrapper
+// has not observed a ClientHello. This is a real adapted Caddyfile, not a
+// direct handler-only test.
+func TestIntegrationSpoofedFingerprintFailsClosed(t *testing.T) {
+	f := integrationFake(t)
+	base := startCaddy(t, `
+        vars ja4 {http.request.header.X-Claimed-JA4}
+        vars ja4_bind {http.request.header.X-Claimed-JA4}
+        ja4
+        turnstile {
+            site_key `+testSiteKey+`
+            secret_key `+testSecretKey+`
+            bind_fingerprint
+            allow_insecure_cookie
+        }
+        respond "protected"
+    `)
+	v := newVisitor(t, base)
+	req, err := http.NewRequest(http.MethodPost, base+"/protected", strings.NewReader(solve("good").Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("X-Claimed-JA4", "attacker-controlled-tls-profile")
+	resp, _ := v.do(req)
+	if resp.StatusCode != http.StatusForbidden || len(resp.Cookies()) > 0 || f.calls.Load() != 0 {
+		t.Fatalf("forged request var bypassed missing fingerprint: status=%d cookies=%v verify=%d",
+			resp.StatusCode, resp.Cookies(), f.calls.Load())
+	}
+}
+
+func TestIntegrationOnMissingFingerprintClosedRejectsSpoofedVar(t *testing.T) {
+	base := startCaddy(t, `
+        vars ja4 {http.request.header.X-Claimed-JA4}
+        ja4
+        bot_policy {
+            block t13d1517h2_8daaf6152771_b6f405a00624
+            on_missing_fingerprint closed
+        }
+        respond "not blocked"
+    `)
+	req, err := http.NewRequest(http.MethodGet, base+"/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Claimed-JA4", "attacker-chosen")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden || !strings.HasPrefix(resp.Header.Get("X-Block-Id"), "bp-") {
+		t.Fatalf("bot_policy failed closed? status=%d blockID=%q",
+			resp.StatusCode, resp.Header.Get("X-Block-Id"))
+	}
+}

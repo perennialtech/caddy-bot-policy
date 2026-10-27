@@ -263,8 +263,24 @@ func (ts *Turnstile) fingerprint(r *http.Request) (string, bool) {
 	if ts.BindFingerprintVar == "" {
 		return "", false
 	}
-	fp, _ := caddyhttp.GetVar(r.Context(), ts.BindFingerprintVar).(string)
-	return fp, true
+	// QUIC Initial packets are unauthenticated. The packet sniffer can
+	// attribute a forged Initial's fingerprint to an established HTTP/3
+	// connection, so HTTP/3 cannot safely authorize bound clearances.
+	if r.ProtoMajor == 3 {
+		return "", true
+	}
+	observed, ok := r.Context().Value(observedFingerprintKey{}).(observedFingerprint)
+	if !ok {
+		return "", true // no trusted ja4 handler
+	}
+	switch ts.BindFingerprintVar {
+	case observed.exactName:
+		return observed.exact, true
+	case observed.bindName:
+		return observed.bind, true
+	default:
+		return "", true
+	}
 }
 
 // writeMACField uses length-prefix framing so the policy fields cannot be

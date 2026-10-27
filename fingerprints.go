@@ -12,8 +12,8 @@ import (
 // The listener wrapper and the HTTP handler are separate Caddy modules with
 // no reference to each other, and by the time the handler runs the raw
 // connection is buried under the TLS layer, so a process-wide table keyed by
-// remote address is what bridges them. The key is unique while it matters: a
-// TCP four-tuple cannot be reused while the connection is open, and entries
+// both TCP endpoints is what bridges them. Different local listeners can
+// receive connections from the same remote IP:port simultaneously. Entries
 // are dropped on Close.
 type fingerprintStore struct {
 	mu sync.RWMutex
@@ -87,6 +87,14 @@ func normalizeAddr(addr string) string {
 		host = ip.String()
 	}
 	return net.JoinHostPort(host, port)
+}
+
+// tcpConnectionKey disambiguates connections to different local listeners.
+func tcpConnectionKey(remote, local string) string {
+	if remote == "" || local == "" {
+		return ""
+	}
+	return normalizeAddr(remote) + "|" + normalizeAddr(local)
 }
 
 // idleStore maps a QUIC client address to the JA4 of its ClientHello.

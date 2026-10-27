@@ -111,7 +111,11 @@ func newTurnstileRequest(method, target, fingerprint string, body url.Values) *h
 	if fingerprint != "" {
 		vars["ja4"] = fingerprint
 	}
-	return req.WithContext(context.WithValue(req.Context(), caddyhttp.VarsCtxKey, vars))
+	ctx := context.WithValue(req.Context(), caddyhttp.VarsCtxKey, vars)
+	ctx = context.WithValue(ctx, observedFingerprintKey{}, observedFingerprint{
+		exactName: "ja4", bindName: "ja4_bind", exact: fingerprint, bind: fingerprint,
+	})
+	return req.WithContext(ctx)
 }
 
 // solve is the form the challenge page posts.
@@ -933,11 +937,15 @@ func TestTurnstileQUICMigrationFailsClosed(t *testing.T) {
 		return w, reached
 	}
 
-	// A valid bound cookie is accepted on the original connection address.
+	// HTTP/3 must refuse even an otherwise valid bound cookie on the original
+	// address: the QUIC Initial fingerprint isn't tied to the live connection.
 	issued := ts.mintClearance(time.Now(), newTurnstileRequest(http.MethodGet, "/members", testFPQUIC, nil))
 	cookie := &http.Cookie{Name: ts.cookieName(testFPQUIC, true), Value: issued}
-	if rec, reached := serveThroughJA4(request(http.MethodGet, oldAddr, nil, cookie)); rec.Code != http.StatusOK || !reached {
-		t.Fatalf("initial address: %d, reached=%t", rec.Code, reached)
+	if rec, reached := serveThroughJA4(request(http.MethodGet, oldAddr, nil, cookie)); rec.Code != http.StatusForbidden || reached {
+		t.Fatalf("unsafe HTTP/3 fingerprint accepted: %d, reached=%t", rec.Code, reached)
+	}
+	if rec, reached := serveThroughJA4(request(http.MethodPost, oldAddr, solve("good"), cookie)); rec.Code != http.StatusForbidden || reached || anyCookie(rec) {
+		t.Fatalf("unsafe HTTP/3 verification accepted: %d, reached=%t", rec.Code, reached)
 	}
 	if rec, reached := serveThroughJA4(request(http.MethodGet, newAddr, nil, cookie)); rec.Code != http.StatusForbidden || reached {
 		t.Fatalf("migrated address: %d, reached=%t; expected a challenge", rec.Code, reached)

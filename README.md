@@ -21,8 +21,10 @@ terminated**. Once the handshake completes the ClientHello is gone, and Go's
 `tls.ConnectionState` only exposes the negotiated result, not the offered
 cipher and extension lists the fingerprint is built from. A policy, on the
 other hand, can only be applied once there is a parsed HTTP request. The two
-halves talk through a request variable, which also makes the fingerprint
-available to `log_append` and to Caddy's request matchers.
+halves exchange trusted fingerprints through a private per-request context
+value; the handler also publishes them as request variables for `log_append`,
+matchers and observability. Other directives may change those public variables,
+but cannot forge a fingerprint used for a Turnstile clearance.
 
 ## Configuration
 
@@ -66,7 +68,11 @@ against here: packet conn wrappers always run before QUIC. HTTP/3
 fingerprints start with `q` instead of `t`, so the same browser has a
 different JA4 over h3 than over h2 — block both if you mean to block a
 client. TLS resumption can also change spec-exact JA4; for a blocklist,
-observe and account for the full- and resumed-handshake variants.
+observe and account for the full- and resumed-handshake variants. QUIC
+Initials are unauthenticated, so HTTP/3 fingerprints are diagnostic data
+and **not a sound security boundary**: an adversarial client can inject an
+Initial with another JA4 from the same UDP endpoint. Use h1/h2-only when
+security policy relies on a trustworthy JA4 blocklist.
 
 The `ja4`, `bot_policy` and `turnstile` directives order themselves (in that
 order, ahead of `redir` and any URL rewriting), so no global `order` lines
@@ -161,6 +167,18 @@ other visitors can reuse their clearance for up to 30 days per binding
 profile (subject to browser cookie retention and further fingerprint changes):
 
 ```caddyfile
+{
+    servers {
+        # Required for fingerprint-bound Turnstile: QUIC Initials do not
+        # authenticate the fingerprint of the established HTTP/3 connection.
+        protocols h1 h2
+        listener_wrappers {
+            ja4
+            tls
+        }
+    }
+}
+
 example.com {
 	ja4
 	bot_policy {
@@ -349,7 +367,7 @@ allows same-origin embedding, but disallows embedding from other origins.
 | `clearance_key` | string of at least 32 bytes | Optional. Key that signs the cookie. By default one is derived from `secret_key`, which means **rotating the Turnstile secret invalidates every clearance**. Set this to rotate them independently. |
 | `cookie_name` | cookie prefix (default `bp_clearance`) | Prefix for a cookie name with a keyed configuration suffix and, when bound, a full-fingerprint suffix. Validated when the config loads. |
 | `allow_insecure_cookie` | no arguments (default off) | Issue clearance cookies without `Secure` for **HTTP-only local development**. Never enable on public sites or behind HTTPS-terminating proxies. |
-| `bind_fingerprint` | `[var_name]` (default `ja4_bind`) | Ties the clearance to the resumption-insensitive fingerprint, read from `http.vars.<var_name>`. See below. |
+| `bind_fingerprint` | `[var_name]` (default `ja4_bind`) | Ties clearance to a fingerprint supplied by the trusted `ja4` handler, not a user-writable request variable. HTTP/1.1 and HTTP/2 only. See below. |
 | `max_pending_verifications` | integer (default `64`) | Most siteverify calls this handler has in flight at once. See [Protecting the verification step](#protecting-the-verification-step). |
 
 ### Binding the clearance to the fingerprint
@@ -360,15 +378,19 @@ out of a real browser and replayed from `curl` or a Python script presents
 a different TLS stack, so it is
 rejected and that client is challenged again. See [What a clearance is, and
 is not](#what-a-clearance-is-and-is-not) for what this does not cover. It
-needs the `ja4` handler and listener wrapper set up as above (and the packet
-conn wrapper, for HTTP/3).
+needs the `ja4` handler and TCP listener wrapper set up as above.
+**Disable HTTP/3** with `servers { protocols h1 h2 }` when using this
+option. QUIC Initial packets aren't tied to the authenticated connection,
+so an HTTP/3 request will never be granted a bound clearance. Unbound
+Turnstile still works over HTTP/3.
 
 **A fingerprint is required.** With binding on, a request without one is
 never cleared, and a challenge solved from one is refused *before* calling
-Cloudflare, with a warning in the log. This happens when the listener or
-packet conn wrapper is missing, or when the `bind_fingerprint` argument does
-not match the `ja4` handler's `bind_var_name`. Without the requirement, a configuration mistake would quietly
-produce clearances that bind to nothing.
+Cloudflare, with a warning in the log. This happens if the `ja4` handler or
+TCP listener wrapper is missing, the request is HTTP/3, or the
+`bind_fingerprint` argument does not match the `ja4` handler's published
+`var_name` or `bind_var_name`. This uses private per-request data, not
+`http.vars`, so an earlier `vars` or `map` directive cannot fake it.
 
 **Each binding profile gets its own cookie.** The `ja4` handler publishes both
 `{http.vars.ja4}` (spec-exact, for blocklists and logs) and
@@ -379,9 +401,9 @@ from the extension count and hash, making it stable across the normal TLS
 must not be used as a JA4 blocklist entry. Explicitly configuring
 `bind_fingerprint ja4` retains exact-JA4 behavior, including a further
 challenge when a session resumes. The default may require new clearances
-after upgrading from earlier versions. HTTP/2 versus HTTP/3 and genuinely
-different TLS/ALPN profiles still get separate cookies; later changes to
-the fingerprint may still require another solve.
+after upgrading from earlier versions. Genuinely different TCP TLS/ALPN
+profiles still get separate cookies; later changes to the fingerprint may
+still require another solve. Bound HTTP/3 clearances are not supported.
 Cookie names begin with `bp_clearance_` unless `cookie_name` is customised.
 
 ### `ja4` subdirectives
@@ -412,16 +434,14 @@ Both wrappers accept the same option:
 
 - **HTTP/3 needs Caddy 2.11 or newer**, the first release with
   `packet_conn_wrappers`. On older versions the block is a config error.
-- **QUIC connection migration.** A QUIC fingerprint is tied to the client
-  address the handshake came from. If a client migrates to a new address
-  mid-connection (switching networks, NAT rebinding), its later requests
-  arrive without a fingerprint and fall to `on_missing_fingerprint`.
-  With **`turnstile bind_fingerprint`**, even an already-cleared visitor
-  cannot use the migrated connection: its cookie is rejected and another
-  solve cannot complete because the POST lacks a fingerprint. The user must
-  establish a new QUIC connection. Until migration is supported, the
-  operational fallback is to disable HTTP/3 for Caddy servers using bound
-  Turnstile:
+- **QUIC fingerprints cannot authenticate the live connection.** The UDP
+  packet wrapper observes unauthenticated Initial packets, keyed by source
+  address. Another Initial from the same socket (or a source-spoofed packet)
+  can replace the fingerprint attributed to an already-established HTTP/3
+  connection; migration to a new address loses the original fingerprint.
+  Therefore, with `turnstile bind_fingerprint` an HTTP/3 request always
+  fails closed, including a verification POST. **Disable HTTP/3** on sites
+  requiring bound Turnstile to avoid presenting an unsolvable challenge:
 
   ```caddyfile
   {
@@ -435,15 +455,11 @@ Both wrappers accept the same option:
   }
   ```
 
-  This setting is server-wide; the HTTP/3 packet conn wrapper is unnecessary
-  with h3 disabled. Keep binding enabled rather than silently accepting
-  unbound clearances.
-- **UDP source addresses can be spoofed.** Initial packets are encrypted
-  with keys anyone can derive, so an attacker who knows a client's exact
-  address and port — in practice, one on the network path — could send a
-  crafted Initial that replaces that client's QUIC fingerprint. All state
-  created from unauthenticated datagrams is capped in size, count and
-  lifetime, so this cannot exhaust memory.
+  This setting is server-wide. Unbound Turnstile remains supported with
+  HTTP/3. QUIC-derived JA4 values remain useful for telemetry, but must not
+  be trusted as an authorization boundary in `bot_policy` either.
+  The HTTP/3 packet parser's state is bounded to avoid memory exhaustion,
+  but that is distinct from fingerprint authenticity.
 - **PROXY protocol.** If Caddy sits behind a load balancer that speaks the
   PROXY protocol, its header precedes the ClientHello on the wire. The wrapper
   that decodes it must come **before** `ja4` in `listener_wrappers`, or `ja4`
@@ -516,8 +532,9 @@ go vet ./...
 go test ./...
 ```
 
-The policy and Turnstile tests inject the fingerprint directly through
-`caddyhttp.SetVar`/`VarsCtxKey`; the fingerprint tests start a real listener
+The policy tests exercise the public `http.vars` interface; the Turnstile
+tests use a trusted per-request fingerprint fixture, including negative tests
+for spoofed public variables. Fingerprint tests start a real listener
 and perform real handshakes with Go's TLS client, and with quic-go for
 HTTP/3. The Turnstile tests run against a stand-in siteverify server; the
 integration tests among them load real Caddyfiles (with `try_files`,

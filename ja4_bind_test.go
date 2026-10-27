@@ -2,6 +2,7 @@ package botpolicy
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -26,12 +27,18 @@ func TestJA4PublishesDistinctExactAndBoundVariables(t *testing.T) {
 			if err := h.Provision(caddy.Context{}); err != nil {
 				t.Fatal(err)
 			}
-			tc.set(tc.addr, "exact-ja4", "normalized-ja4")
-			defer tc.clear(tc.addr)
-
+			key := tc.addr
 			r := httptest.NewRequest(http.MethodGet, "/", nil)
 			r.ProtoMajor, r.RemoteAddr = tc.proto, tc.addr
-			r = r.WithContext(context.WithValue(r.Context(), caddyhttp.VarsCtxKey, map[string]any{}))
+			ctx := context.WithValue(r.Context(), caddyhttp.VarsCtxKey, map[string]any{})
+			if tc.proto != 3 {
+				local := &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 443}
+				key = tcpConnectionKey(tc.addr, local.String())
+				ctx = context.WithValue(ctx, http.LocalAddrContextKey, local)
+			}
+			tc.set(key, "exact-ja4", "normalized-ja4")
+			defer tc.clear(key)
+			r = r.WithContext(ctx)
 			w := httptest.NewRecorder()
 			err := h.ServeHTTP(w, r, caddyhttp.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) error {
 				if got := caddyhttp.GetVar(r.Context(), "ja4"); got != "exact-ja4" {

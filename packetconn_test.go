@@ -165,9 +165,10 @@ func (c *closeRecorder) Unwrap() net.PacketConn { return c.PacketConn }
 func TestHandlerUsesQUICFingerprintForHTTP3(t *testing.T) {
 	const addr = "198.51.100.7:4433"
 	quicConns.set(addr, "q13d0312h3_55b375c5d22e_cd85d2d88918")
-	conns.set(addr, "t13d1516h2_8daaf6152771_e5627efa2ab1") // same addr over TCP
+	tcpKey := tcpConnectionKey(addr, "127.0.0.1:443")
+	conns.set(tcpKey, "t13d1516h2_8daaf6152771_e5627efa2ab1")
 	defer quicConns.delete(addr)
-	defer conns.delete(addr)
+	defer conns.delete(tcpKey)
 
 	for proto, want := range map[int]string{
 		3: "q13d0312h3_55b375c5d22e_cd85d2d88918",
@@ -177,7 +178,11 @@ func TestHandlerUsesQUICFingerprintForHTTP3(t *testing.T) {
 		req.RemoteAddr = addr
 		req.ProtoMajor = proto
 		vars := map[string]any{}
-		req = req.WithContext(context.WithValue(req.Context(), caddyhttp.VarsCtxKey, vars))
+		ctx := context.WithValue(req.Context(), caddyhttp.VarsCtxKey, vars)
+		if proto != 3 {
+			ctx = context.WithValue(ctx, http.LocalAddrContextKey, &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 443})
+		}
+		req = req.WithContext(ctx)
 
 		h := &Handler{VarName: "ja4"}
 		if err := h.ServeHTTP(httptest.NewRecorder(), req, passThrough); err != nil {

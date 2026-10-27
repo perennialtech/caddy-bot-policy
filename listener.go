@@ -120,7 +120,7 @@ func (l *ja4Listener) Accept() (net.Conn, error) {
 	return &trackedConn{
 		Conn:   conn,
 		reader: bufio.NewReaderSize(conn, l.max),
-		addr:   normalizeAddr(conn.RemoteAddr().String()),
+		addr:   tcpConnectionKey(conn.RemoteAddr().String(), conn.LocalAddr().String()),
 		max:    l.max,
 		logger: l.logger,
 	}, nil

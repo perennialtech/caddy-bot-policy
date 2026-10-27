@@ -3,6 +3,7 @@ package botpolicy
 import (
 	"context"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -10,9 +11,11 @@ import (
 	"fmt"
 	"html/template"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -22,10 +25,11 @@ import (
 	"go.uber.org/zap"
 )
 
-const (
-	// siteverifyURL is Cloudflare's Turnstile token validation endpoint.
-	siteverifyURL = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
+// siteverifyURL is Cloudflare's Turnstile token validation endpoint. It is a
+// variable only so that tests can point it at a stand-in server.
+var siteverifyURL = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
 
+const (
 	// turnstileAction is sent as the widget's data-action and checked in the
 	// siteverify response, so a token minted for some other form on the same
 	// site key cannot be redeemed for a clearance.
@@ -34,33 +38,54 @@ const (
 	// turnstileTokenField is the form field the widget writes its token into.
 	turnstileTokenField = "cf-turnstile-response"
 
+	// turnstileMarkerField marks a POST as the challenge page's own
+	// submission, as opposed to some other form posted by an uncleared
+	// client.
+	turnstileMarkerField = "__bp_turnstile"
+
 	// maxTurnstileToken is the longest token Cloudflare issues.
 	maxTurnstileToken = 2048
 
 	defaultClearanceTTL    = 30 * 24 * time.Hour
 	defaultClearanceCookie = "bp_clearance"
-	defaultVerifyPath      = "/.bot-policy/turnstile"
+
+	// defaultMaxPendingVerifications bounds concurrent siteverify calls per
+	// handler. It is not a rate limit, only a cap on the goroutines and
+	// outbound connections an unauthenticated flood can tie up; see the
+	// README for per-client rate limiting.
+	defaultMaxPendingVerifications = 64
+
+	// Browsers cap cookie lifetimes at 400 days (RFC 6265bis), and below a
+	// minute a clearance would expire before the redirect lands.
+	minClearanceTTL = time.Minute
+	maxClearanceTTL = 400 * 24 * time.Hour
 
 	// clearanceKeyLabel separates the HMAC key derived from the Turnstile
 	// secret from any other use of that secret.
 	clearanceKeyLabel = "caddy-bot-policy/turnstile/clearance/v1"
 )
 
+var varNamePattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
+
 // Turnstile is an HTTP middleware that requires a Cloudflare Turnstile
 // clearance before letting a request through.
 //
 // A request carrying a valid clearance cookie goes straight to the next
 // handler. Any other request is answered with a challenge page hosting the
-// Turnstile widget. The widget's token is posted to VerifyPath, checked
-// against Cloudflare's siteverify endpoint, and on success the visitor gets
-// a signed clearance cookie and is redirected back to the page they asked
-// for. A token that fails verification is answered with a 403 and no cookie.
+// Turnstile widget. The solved widget posts its token back to the URL the
+// visitor originally asked for, where this handler redeems it with
+// Cloudflare's siteverify endpoint; on success the visitor gets a signed
+// clearance cookie and is redirected to that same URL with a GET. A token
+// that fails verification is answered with a 403 and no cookie.
 //
 // The cookie is stateless: it carries the time it was issued and an
 // HMAC-SHA256 over that time, the site's hostname and, optionally, the
 // client's JA4 fingerprint. Nothing is stored server-side, so it works
 // unchanged across restarts and across several Caddy instances that share
 // the same keys.
+//
+// It is a bearer credential: anything that presents the cookie (with the
+// same fingerprint, if bound) is treated as having solved the challenge.
 //
 //	turnstile {
 //		site_key         {env.TURNSTILE_SITE_KEY}
@@ -84,31 +109,32 @@ type Turnstile struct {
 	ClearanceKey string `json:"clearance_key,omitempty"`
 
 	// ClearanceTTL is how long a clearance stays valid after it is issued.
-	// Defaults to 30 days.
+	// Defaults to 30 days; must be between one minute and 400 days.
 	ClearanceTTL caddy.Duration `json:"clearance_ttl,omitempty"`
 
 	// CookieName is the name of the clearance cookie. Defaults to
-	// "bp_clearance".
+	// "bp_clearance". With fingerprint binding, a suffix naming the
+	// transport is appended ("bp_clearance_t", "bp_clearance_q").
 	CookieName string `json:"cookie_name,omitempty"`
-
-	// VerifyPath is the path the challenge page posts the Turnstile token
-	// to. Defaults to "/.bot-policy/turnstile". POST requests to this path
-	// are handled here and never reach the next handler.
-	VerifyPath string `json:"verify_path,omitempty"`
 
 	// BindFingerprintVar, if set, names the http.vars.* key holding the
 	// client's JA4 fingerprint (normally "ja4", published by the ja4
-	// handler). The clearance is then only accepted from a client with the
-	// same fingerprint it was issued to, so a cookie lifted from a browser
-	// and replayed from a script with a different TLS stack is rejected.
+	// handler). A clearance is then only issued to a request that has a
+	// fingerprint, and only accepted from a client with the same
+	// fingerprint. Requests without one are never cleared.
 	BindFingerprintVar string `json:"bind_fingerprint_var,omitempty"`
 
-	key        []byte
-	ttl        time.Duration
-	siteverify string
-	client     *http.Client
-	now        func() time.Time
-	logger     *zap.Logger
+	// MaxPendingVerifications caps how many siteverify calls this handler
+	// has in flight at once. Submissions beyond it get a 503 without
+	// calling Cloudflare. Defaults to 64.
+	MaxPendingVerifications int `json:"max_pending_verifications,omitempty"`
+
+	key     []byte
+	ttl     time.Duration
+	pending chan struct{}
+	client  *http.Client
+	now     func() time.Time
+	logger  *zap.Logger
 }
 
 // CaddyModule returns the Caddy module information.
@@ -119,7 +145,8 @@ func (Turnstile) CaddyModule() caddy.ModuleInfo {
 	}
 }
 
-// Provision sets up ts.
+// Provision sets up ts and validates its configuration, so that a mistake
+// is a config error at load time rather than a broken challenge at runtime.
 func (ts *Turnstile) Provision(ctx caddy.Context) error {
 	ts.logger = ctx.Logger()
 
@@ -133,6 +160,10 @@ func (ts *Turnstile) Provision(ctx caddy.Context) error {
 	}
 	if ts.SecretKey == "" {
 		return errors.New("turnstile: secret_key is required")
+	}
+	if isDummySecret(ts.SecretKey) {
+		ts.logger.Warn("turnstile is using one of Cloudflare's public testing secret keys; " +
+			"every visitor will get the same result and hostname/action are not checked. Do not use this in production")
 	}
 
 	switch {
@@ -150,23 +181,33 @@ func (ts *Turnstile) Provision(ctx caddy.Context) error {
 	if ts.ttl == 0 {
 		ts.ttl = defaultClearanceTTL
 	}
-	if ts.ttl < 0 {
-		return errors.New("turnstile: clearance_ttl must be positive")
+	if ts.ttl < minClearanceTTL || ts.ttl > maxClearanceTTL {
+		return fmt.Errorf("turnstile: clearance_ttl must be between %v and 400 days, got %v", minClearanceTTL, ts.ttl)
 	}
 
 	if ts.CookieName == "" {
 		ts.CookieName = defaultClearanceCookie
 	}
-	if ts.VerifyPath == "" {
-		ts.VerifyPath = defaultVerifyPath
-	}
-	if !strings.HasPrefix(ts.VerifyPath, "/") {
-		return fmt.Errorf("turnstile: verify_path must start with '/', got %q", ts.VerifyPath)
+	// The transport suffix is checked too, since that is the name actually
+	// sent when binding is on.
+	for _, name := range []string{ts.CookieName, ts.CookieName + "_t"} {
+		if err := (&http.Cookie{Name: name, Value: "x"}).Valid(); err != nil {
+			return fmt.Errorf("turnstile: invalid cookie_name %q: %v", ts.CookieName, err)
+		}
 	}
 
-	if ts.siteverify == "" {
-		ts.siteverify = siteverifyURL
+	if ts.BindFingerprintVar != "" && !varNamePattern.MatchString(ts.BindFingerprintVar) {
+		return fmt.Errorf("turnstile: invalid bind_fingerprint variable name %q", ts.BindFingerprintVar)
 	}
+
+	if ts.MaxPendingVerifications == 0 {
+		ts.MaxPendingVerifications = defaultMaxPendingVerifications
+	}
+	if ts.MaxPendingVerifications < 1 {
+		return errors.New("turnstile: max_pending_verifications must be at least 1")
+	}
+	ts.pending = make(chan struct{}, ts.MaxPendingVerifications)
+
 	if ts.client == nil {
 		ts.client = &http.Client{Timeout: 10 * time.Second}
 	}
@@ -178,13 +219,52 @@ func (ts *Turnstile) Provision(ctx caddy.Context) error {
 
 // ServeHTTP implements caddyhttp.MiddlewareHandler.
 func (ts *Turnstile) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
-	if r.Method == http.MethodPost && r.URL.Path == ts.VerifyPath {
-		return ts.verify(w, r)
-	}
-	if c, err := r.Cookie(ts.CookieName); err == nil && ts.validClearance(c.Value, r) {
+	if ts.cleared(r) {
 		return next.ServeHTTP(w, r)
 	}
+	if r.Method == http.MethodPost && isFormPost(r) {
+		r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+		if err := r.ParseForm(); err == nil && r.PostForm.Get(turnstileMarkerField) != "" {
+			return ts.verify(w, r)
+		}
+		// Some other form posted by a client without clearance. It would
+		// be challenged anyway, so consuming its body is harmless.
+	}
 	return ts.challenge(w, r)
+}
+
+// fingerprint returns the bound fingerprint for r and whether binding is
+// on. With binding on, an empty fingerprint means r cannot be cleared.
+func (ts *Turnstile) fingerprint(r *http.Request) (string, bool) {
+	if ts.BindFingerprintVar == "" {
+		return "", false
+	}
+	fp, _ := caddyhttp.GetVar(r.Context(), ts.BindFingerprintVar).(string)
+	return fp, true
+}
+
+// cookieName is the clearance cookie used for r. With binding on, each
+// transport gets its own cookie: a browser has a different JA4 over TCP
+// (t...) and QUIC (q...), and one shared cookie would be overwritten on every
+// switch between HTTP/2 and HTTP/3, re-challenging the visitor each time.
+func (ts *Turnstile) cookieName(fp string, bound bool) string {
+	if !bound {
+		return ts.CookieName
+	}
+	transport := "x"
+	if c := fp[0]; c >= 'a' && c <= 'z' {
+		transport = string(c)
+	}
+	return ts.CookieName + "_" + transport
+}
+
+func (ts *Turnstile) cleared(r *http.Request) bool {
+	fp, bound := ts.fingerprint(r)
+	if bound && fp == "" {
+		return false
+	}
+	c, err := r.Cookie(ts.cookieName(fp, bound))
+	return err == nil && ts.validClearance(c.Value, r)
 }
 
 // mintClearance returns a clearance cookie value issued at the given time.
@@ -196,6 +276,9 @@ func (ts *Turnstile) mintClearance(issued time.Time, r *http.Request) string {
 // validClearance reports whether value is a clearance this handler issued
 // for this host (and fingerprint, if bound) that has not expired.
 func (ts *Turnstile) validClearance(value string, r *http.Request) bool {
+	if fp, bound := ts.fingerprint(r); bound && fp == "" {
+		return false
+	}
 	version, rest, ok := strings.Cut(value, ".")
 	if !ok || version != "1" {
 		return false
@@ -228,9 +311,13 @@ func (ts *Turnstile) clearanceMAC(iat string, r *http.Request) []byte {
 	mac.Write([]byte{0})
 	mac.Write([]byte(requestHostname(r)))
 	mac.Write([]byte{0})
-	if ts.BindFingerprintVar != "" {
-		fp, _ := caddyhttp.GetVar(r.Context(), ts.BindFingerprintVar).(string)
+	// The mode byte keeps bound and unbound clearances apart even if the
+	// same key were used for both.
+	if fp, bound := ts.fingerprint(r); bound {
+		mac.Write([]byte("j"))
 		mac.Write([]byte(fp))
+	} else {
+		mac.Write([]byte("-"))
 	}
 	return mac.Sum(nil)
 }
@@ -242,45 +329,88 @@ var challengeTemplate = template.Must(template.New("challenge").Parse(`<!doctype
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
 <title>Checking your browser</title>
-<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
-<style>
-body{font-family:system-ui,sans-serif;display:flex;min-height:100vh;margin:0;align-items:center;justify-content:center;background:#fafafa;color:#222}
-@media (prefers-color-scheme:dark){body{background:#151515;color:#ddd}}
-main{text-align:center;padding:16px}
-button{margin-top:16px;padding:8px 20px;font:inherit;cursor:pointer}
-</style>
+<script nonce="{{.Nonce}}" src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+<style nonce="{{.Nonce}}">` + pageStyle + `</style>
 </head>
 <body>
 <main>
 <h1>Checking your browser</h1>
 <p>This only takes a moment.</p>
-<form id="bp-turnstile" method="POST" action="{{.VerifyPath}}">
-<input type="hidden" name="return" value="{{.Return}}">
-<div class="cf-turnstile" data-sitekey="{{.SiteKey}}" data-action="{{.Action}}" data-callback="bpTurnstileDone"></div>
-<noscript><p>JavaScript is required to continue.</p></noscript>
-<button type="submit">Continue</button>
+<form id="bp-turnstile" method="POST" action="{{.Action}}">
+<input type="hidden" name="` + turnstileMarkerField + `" value="1">
+<div class="cf-turnstile" data-sitekey="{{.SiteKey}}" data-action="{{.WidgetAction}}" data-callback="bpTurnstileDone"></div>
 </form>
+<noscript><p>JavaScript is required to continue.</p></noscript>
 </main>
-<script>function bpTurnstileDone(){document.getElementById("bp-turnstile").submit()}</script>
+<script nonce="{{.Nonce}}">function bpTurnstileDone(){document.getElementById("bp-turnstile").submit()}</script>
 </body>
 </html>
 `))
 
-// challenge serves the Turnstile challenge page.
+var statusTemplate = template.Must(template.New("status").Parse(`<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>{{.Title}}</title>
+<style nonce="{{.Nonce}}">` + pageStyle + `</style>
+</head>
+<body>
+<main>
+<h1>{{.Title}}</h1>
+<p>{{.Message}}</p>
+<p><a href="{{.Retry}}">Try again</a></p>
+{{if .BlockID}}<p><small>Block ID: {{.BlockID}}</small></p>{{end}}
+</main>
+</body>
+</html>
+`))
+
+const pageStyle = `body{font-family:system-ui,sans-serif;display:flex;min-height:100vh;margin:0;align-items:center;justify-content:center;background:#fafafa;color:#222}
+@media (prefers-color-scheme:dark){body{background:#151515;color:#ddd}a{color:#8ab4f8}}
+main{text-align:center;padding:16px}`
+
+// setPageHeaders sets the headers shared by every page this handler serves,
+// and returns the CSP nonce for the page's own script and style.
 //
-// It is sent with a 403 so that crawlers and API clients do not mistake it
-// for the page they asked for, and is never cached.
-func (ts *Turnstile) challenge(w http.ResponseWriter, r *http.Request) error {
+// The page sets its own Content-Security-Policy, replacing any the site
+// set earlier in the route (a header directive runs before this handler),
+// because a site's policy is written for the site's pages and will usually
+// block Turnstile. It follows Cloudflare's recommended nonce-based setup:
+// the nonce is put on api.js, which propagates it to what it loads.
+func setPageHeaders(w http.ResponseWriter) string {
+	var b [16]byte
+	_, _ = rand.Read(b[:])
+	nonce := base64.RawURLEncoding.EncodeToString(b[:]) // CSP allows - and _; html/template would escape +
+
 	h := w.Header()
 	h.Set("Content-Type", "text/html; charset=utf-8")
 	h.Set("Cache-Control", "no-store")
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("Referrer-Policy", "same-origin")
+	h.Set("Content-Security-Policy", "script-src 'nonce-"+nonce+"' 'strict-dynamic' https://challenges.cloudflare.com; "+
+		"frame-src https://challenges.cloudflare.com; "+
+		"object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
+	return nonce
+}
+
+// challenge serves the Turnstile challenge page.
+//
+// It is sent with a 403 so that crawlers and API clients do not mistake it
+// for the page they asked for, and is never cached. The form posts back to
+// the URL the visitor originally requested, so the submission goes through
+// the same routes and matchers as the request that was challenged, whatever
+// rewrites happen along the way.
+func (ts *Turnstile) challenge(w http.ResponseWriter, r *http.Request) error {
+	nonce := setPageHeaders(w)
 	w.WriteHeader(http.StatusForbidden)
 	if r.Method == http.MethodHead {
 		return nil
 	}
 	return challengeTemplate.Execute(w, struct {
-		VerifyPath, Return, SiteKey, Action string
-	}{ts.VerifyPath, r.URL.RequestURI(), ts.SiteKey, turnstileAction})
+		Nonce, Action, SiteKey, WidgetAction string
+	}{nonce, originalURI(r), ts.SiteKey, turnstileAction})
 }
 
 // siteverifyResult is the part of Cloudflare's siteverify response that is
@@ -290,33 +420,58 @@ type siteverifyResult struct {
 	Hostname   string   `json:"hostname"`
 	Action     string   `json:"action"`
 	ErrorCodes []string `json:"error-codes"`
+	Metadata   struct {
+		// ResultWithTestingKey is set when the secret is one of
+		// Cloudflare's public testing keys. Those responses report the
+		// hostname as example.com and carry no action.
+		ResultWithTestingKey bool `json:"result_with_testing_key"`
+	} `json:"metadata"`
 }
 
 // verify redeems the posted Turnstile token and, if Cloudflare accepts it,
 // issues a clearance cookie and redirects back to the original page.
 func (ts *Turnstile) verify(w http.ResponseWriter, r *http.Request) error {
-	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
-	if err := r.ParseForm(); err != nil {
-		return ts.reject(w, r, "unreadable form", nil)
-	}
 	token := r.PostForm.Get(turnstileTokenField)
 	if token == "" || len(token) > maxTurnstileToken {
 		return ts.reject(w, r, "missing or oversized token", nil)
+	}
+	fp, bound := ts.fingerprint(r)
+	if bound && fp == "" {
+		// Checked before calling Cloudflare: there is nothing to bind to,
+		// so no clearance could be issued anyway. This is almost always a
+		// configuration problem (missing listener or packet conn wrapper,
+		// or a var name that does not match the ja4 handler's).
+		ts.logger.Warn("turnstile cannot issue a bound clearance: request has no fingerprint",
+			zap.String("var_name", ts.BindFingerprintVar),
+			zap.String("proto", r.Proto),
+		)
+		return ts.reject(w, r, "no fingerprint to bind", nil)
+	}
+
+	select {
+	case ts.pending <- struct{}{}:
+		defer func() { <-ts.pending }()
+	default:
+		ts.logger.Warn("turnstile verification refused: too many pending verifications",
+			zap.Int("max_pending_verifications", ts.MaxPendingVerifications))
+		return ts.unavailable(w, r)
 	}
 
 	result, err := ts.siteverifyToken(r.Context(), token, r)
 	if err != nil {
 		ts.logger.Error("turnstile siteverify failed", zap.Error(err))
-		w.Header().Set("Cache-Control", "no-store")
-		w.Header().Set("Retry-After", "5")
-		http.Error(w, "503 Service Unavailable: verification is temporarily unavailable, please try again", http.StatusServiceUnavailable)
-		return nil
+		return ts.unavailable(w, r)
 	}
 
 	host := requestHostname(r)
 	switch {
 	case !result.Success:
 		return ts.reject(w, r, "token rejected", result)
+	case result.Metadata.ResultWithTestingKey:
+		// Only a public testing secret produces this, and with one every
+		// token passes regardless, so checking hostname and action would
+		// only make the testing keys unusable.
+		ts.logger.Warn("turnstile accepted a token from a testing key; hostname and action were not checked")
 	case result.Action != turnstileAction:
 		return ts.reject(w, r, "action mismatch", result)
 	case !strings.EqualFold(result.Hostname, host):
@@ -325,7 +480,7 @@ func (ts *Turnstile) verify(w http.ResponseWriter, r *http.Request) error {
 
 	now := ts.now()
 	http.SetCookie(w, &http.Cookie{
-		Name:     ts.CookieName,
+		Name:     ts.cookieName(fp, bound),
 		Value:    ts.mintClearance(now, r),
 		Path:     "/",
 		Expires:  now.Add(ts.ttl),
@@ -340,7 +495,7 @@ func (ts *Turnstile) verify(w http.ResponseWriter, r *http.Request) error {
 	)
 
 	w.Header().Set("Cache-Control", "no-store")
-	http.Redirect(w, r, safeReturnPath(r.PostForm.Get("return")), http.StatusSeeOther)
+	http.Redirect(w, r, originalURI(r), http.StatusSeeOther)
 	return nil
 }
 
@@ -354,7 +509,7 @@ func (ts *Turnstile) siteverifyToken(ctx context.Context, token string, r *http.
 		form.Set("remoteip", ip)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, ts.siteverify, strings.NewReader(form.Encode()))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, siteverifyURL, strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, err
 	}
@@ -377,7 +532,8 @@ func (ts *Turnstile) siteverifyToken(ctx context.Context, token string, r *http.
 }
 
 // reject answers a failed verification with a 403 and no clearance. The
-// visitor is not remembered: loading the page again serves a fresh challenge.
+// visitor is not remembered; the page links back to the original URL, where
+// a GET serves a fresh challenge.
 func (ts *Turnstile) reject(w http.ResponseWriter, r *http.Request, reason string, result *siteverifyResult) error {
 	id := newBlockID("ts-")
 	fields := []zap.Field{
@@ -396,15 +552,41 @@ func (ts *Turnstile) reject(w http.ResponseWriter, r *http.Request, reason strin
 	ts.logger.Info("turnstile verification failed", fields...)
 
 	w.Header().Set("X-Block-Id", id)
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.WriteHeader(http.StatusForbidden)
-	fmt.Fprintf(w, "403 Forbidden: verification failed (block id: %s)\n", id)
-	return nil
+	return ts.status(w, r, http.StatusForbidden, "Verification failed", "We couldn't verify your browser.", id)
+}
+
+// unavailable answers when verification could not be attempted: Cloudflare
+// unreachable or too many verifications in flight. No clearance is issued,
+// but this is not a block.
+func (ts *Turnstile) unavailable(w http.ResponseWriter, r *http.Request) error {
+	w.Header().Set("Retry-After", "5")
+	return ts.status(w, r, http.StatusServiceUnavailable, "Verification unavailable",
+		"Verification is temporarily unavailable. Please try again in a few seconds.", "")
+}
+
+func (ts *Turnstile) status(w http.ResponseWriter, r *http.Request, code int, title, message, blockID string) error {
+	nonce := setPageHeaders(w)
+	w.WriteHeader(code)
+	return statusTemplate.Execute(w, struct {
+		Nonce, Title, Message, Retry, BlockID string
+	}{nonce, title, message, originalURI(r), blockID})
+}
+
+// originalURI is the path and query the visitor actually requested, before
+// any rewrite, try_files or handle_path changed r.URL. It is where the
+// challenge form posts, where a successful verification redirects, and
+// where "try again" links point.
+func originalURI(r *http.Request) string {
+	u := r.URL
+	if or, ok := r.Context().Value(caddyhttp.OriginalRequestCtxKey).(http.Request); ok && or.URL != nil {
+		u = or.URL
+	}
+	return safeReturnPath(u.RequestURI())
 }
 
 // safeReturnPath returns p if it is a path on this site, and "/" otherwise,
-// so the verify endpoint cannot be used as an open redirect.
+// so that a crafted request line can never turn into an off-site redirect or
+// form action.
 func safeReturnPath(p string) string {
 	if !strings.HasPrefix(p, "/") || strings.HasPrefix(p, "//") || strings.HasPrefix(p, "/\\") {
 		return "/"
@@ -419,6 +601,18 @@ func safeReturnPath(p string) string {
 		return "/"
 	}
 	return p
+}
+
+func isFormPost(r *http.Request) bool {
+	mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	return err == nil && mt == "application/x-www-form-urlencoded"
+}
+
+// isDummySecret reports whether s is one of Cloudflare's published testing
+// secret keys ("1x000...AA", "2x000...AA", "3x000...AA").
+func isDummySecret(s string) bool {
+	return len(s) == 35 && s[0] >= '1' && s[0] <= '3' && s[1] == 'x' &&
+		strings.Trim(s[2:33], "0") == "" && s[33:] == "AA"
 }
 
 // requestHostname is the request's Host without any port, lowercased. It is

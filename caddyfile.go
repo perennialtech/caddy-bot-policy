@@ -1,6 +1,8 @@
 package botpolicy
 
 import (
+	"strconv"
+
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
@@ -82,8 +84,8 @@ func (bp *BotPolicy) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 //		clearance_key    <at least 32 bytes>
 //		clearance_ttl    30d
 //		cookie_name      bp_clearance
-//		verify_path      /.bot-policy/turnstile
 //		bind_fingerprint [<var_name>]
+//		max_pending_verifications 64
 //	}
 func parseTurnstileCaddyfile(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error) {
 	var ts Turnstile
@@ -111,7 +113,7 @@ func (ts *Turnstile) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 					return d.ArgErr()
 				}
 				continue
-			case "site_key", "secret_key", "clearance_key", "clearance_ttl", "cookie_name", "verify_path":
+			case "site_key", "secret_key", "clearance_key", "clearance_ttl", "cookie_name", "max_pending_verifications":
 			default:
 				return d.Errf("unrecognized turnstile subdirective '%s'", sub)
 			}
@@ -138,8 +140,12 @@ func (ts *Turnstile) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				ts.ClearanceTTL = caddy.Duration(dur)
 			case "cookie_name":
 				ts.CookieName = val
-			case "verify_path":
-				ts.VerifyPath = val
+			case "max_pending_verifications":
+				n, err := strconv.Atoi(val)
+				if err != nil || n < 1 {
+					return d.Errf("max_pending_verifications must be a positive integer, got %q", val)
+				}
+				ts.MaxPendingVerifications = n
 			}
 		}
 	}

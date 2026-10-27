@@ -1,0 +1,38 @@
+# Browser test for the turnstile handler; see run.py.
+#
+# Uses Cloudflare's public testing keys, so it needs network access to
+# challenges.cloudflare.com: 18443 always passes, 18444 always fails.
+{
+	admin off
+	skip_install_trust
+	local_certs
+	http_port 18080
+	https_port 18443
+	servers {
+		listener_wrappers {
+			ja4
+			tls
+		}
+	}
+}
+
+https://localhost:18443 {
+	# A site-wide policy that would block Turnstile if the challenge page
+	# did not replace it.
+	header Content-Security-Policy "default-src 'self'; script-src 'self'"
+	ja4
+	turnstile {
+		site_key         1x00000000000000000000AA
+		secret_key       1x0000000000000000000000000000000AA
+		bind_fingerprint
+	}
+	respond "protected content, ja4={http.vars.ja4}"
+}
+
+https://localhost:18444 {
+	turnstile {
+		site_key   1x00000000000000000000AA
+		secret_key 2x0000000000000000000000000000000AA
+	}
+	respond "should never be seen"
+}

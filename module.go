@@ -62,11 +62,18 @@ func init() {
 	// published the fingerprint, and RegisterDirectiveOrder can only anchor
 	// against directives from Caddy's standard distribution — it panics on
 	// anything else, so "ja4 before bot_policy" is not expressible directly.
-	// Anchoring all three before basicauth, in this order, leaves the list
-	// as [... ja4, bot_policy, turnstile, basicauth ...]: the fingerprint
-	// is published first, blocklisted clients never get a challenge, and
-	// turnstile can bind its clearance to the fingerprint.
-	httpcaddyfile.RegisterDirectiveOrder("ja4", httpcaddyfile.Before, "basicauth")
-	httpcaddyfile.RegisterDirectiveOrder("bot_policy", httpcaddyfile.Before, "basicauth")
-	httpcaddyfile.RegisterDirectiveOrder("turnstile", httpcaddyfile.Before, "basicauth")
+	// Anchoring all three before redir, in this order, leaves the list as
+	// [... header, request_body, ja4, bot_policy, turnstile, redir, method,
+	// rewrite, uri, try_files ...]: the fingerprint is published first,
+	// blocklisted clients never get a challenge, and turnstile can bind its
+	// clearance to the fingerprint.
+	//
+	// Running ahead of redir, rewrite, uri and try_files means that matchers
+	// on these three directives see the URL the visitor actually requested. A path-scoped
+	// turnstile cannot be sidestepped by a rewrite that happens to move a
+	// protected URL elsewhere, and the challenge form, which posts back to
+	// the requested URL, reaches the same route as the request it answers.
+	httpcaddyfile.RegisterDirectiveOrder("ja4", httpcaddyfile.Before, "redir")
+	httpcaddyfile.RegisterDirectiveOrder("bot_policy", httpcaddyfile.Before, "redir")
+	httpcaddyfile.RegisterDirectiveOrder("turnstile", httpcaddyfile.Before, "redir")
 }

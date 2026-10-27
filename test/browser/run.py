@@ -27,6 +27,24 @@ def check(cond, msg):
     print("ok:", msg)
 
 
+def clearance_jar(ctx, origin):
+    # Cookies are scoped to the hostname, NOT the port. PASS and FAIL both
+    # use localhost, so the successful policy's cookie will still be here.
+    return {
+        c["name"]: c["value"]
+        for c in ctx.cookies(origin)
+        if c["name"].startswith("bp_clearance_")
+    }
+
+
+def require_unchanged_clearances(before, after):
+    # Check both new names and existing names with modified values; a
+    # failed verifier must never mint a clearance under *any* namespace.
+    changes = [name for name, value in after.items() if before.get(name) != value]
+    if changes:
+        raise AssertionError(f"unexpected clearance cookie(s): {changes}")
+
+
 with sync_playwright() as p:
     browser = p.chromium.launch()
     ctx = browser.new_context(ignore_https_errors=True)
@@ -61,12 +79,25 @@ with sync_playwright() as p:
         status = e.code
     check(status == 403, f"bound cookie replayed from another TLS stack is refused ({status})")
 
+    before_fail = clearance_jar(ctx, FAIL)
+    check(bool(before_fail), "existing pass cookie is visible on failure origin (same hostname)")
     page2 = ctx.new_page()
     page2.goto(FAIL + "/somewhere?z=9")
     page2.get_by_text("couldn't verify").wait_for(timeout=45000)
     check(page2.get_attribute("a", "href") == "/somewhere?z=9", "failure page links back to the original URL")
     check("ts-" in page2.inner_text("body"), "failure page shows a block ID")
-    check(not [x for x in ctx.cookies(FAIL) if x["name"] == "bp_clearance"], "no clearance after a failed verification")
+    require_unchanged_clearances(before_fail, clearance_jar(ctx, FAIL))
+    print("ok: no new or changed clearance after a failed verification")
+
+    # Negative control: deliberately put a bogus clearance into this origin
+    # and prove the exact assertion above catches it.
+    ctx.add_cookies([{"name": "bp_clearance_negative_probe", "value": "unexpected", "url": FAIL}])
+    try:
+        require_unchanged_clearances(before_fail, clearance_jar(ctx, FAIL))
+    except AssertionError:
+        print("ok: negative control catches an unexpected clearance")
+    else:
+        raise AssertionError("negative control did not detect an issued clearance")
 
     browser.close()
 print("all browser checks passed")

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"html/template"
 	"io"
 	"mime"
@@ -66,7 +67,10 @@ const (
 	// Cookie names must differ across signing configurations and, when
 	// binding is enabled, across complete fingerprints. Otherwise visiting
 	// one protected route/profile overwrites another route/profile's cookie.
-	clearanceCookieLabel = "caddy-bot-policy/turnstile/cookie/v1\x00"
+	clearanceCookieLabel = "caddy-bot-policy/turnstile/cookie/v2\x00"
+	// Version 2 signs the site key and fingerprint-variable identity as
+	// well as the host/fingerprint. Version 1 cookies are not accepted.
+	clearanceVersion = "2"
 )
 
 var varNamePattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
@@ -83,10 +87,10 @@ var varNamePattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 // that fails verification is answered with a 403 and no cookie.
 //
 // The cookie is stateless: it carries the time it was issued and an
-// HMAC-SHA256 over that time, the site's hostname and, optionally, the
-// client's JA4 fingerprint. Nothing is stored server-side, so it works
-// unchanged across restarts and across several Caddy instances that share
-// the same keys.
+// HMAC-SHA256 over that time, the policy identity, the site's hostname
+// and, optionally, the client's JA4 fingerprint. Nothing is stored server-
+// side, so it works unchanged across restarts and across several Caddy
+// instances that share the same keys.
 //
 // It is a bearer credential: anything that presents the cookie (with the
 // same fingerprint, if bound) is treated as having solved the challenge.
@@ -132,6 +136,11 @@ type Turnstile struct {
 	// has in flight at once. Submissions beyond it get a 503 without
 	// calling Cloudflare. Defaults to 64.
 	MaxPendingVerifications int `json:"max_pending_verifications,omitempty"`
+
+	// AllowInsecureCookie permits a clearance cookie without Secure on
+	// HTTP-only development sites. Never enable it on a public hostname.
+	// The default is Secure even when Caddy receives HTTP from a TLS proxy.
+	AllowInsecureCookie bool `json:"allow_insecure_cookie,omitempty"`
 
 	key     []byte
 	ttl     time.Duration
@@ -244,6 +253,22 @@ func (ts *Turnstile) fingerprint(r *http.Request) (string, bool) {
 	return fp, true
 }
 
+// writeMACField uses length-prefix framing so the policy fields cannot be
+// reinterpreted by moving delimiters between them.
+func writeMACField(mac hash.Hash, field string) {
+	mac.Write([]byte(strconv.Itoa(len(field))))
+	mac.Write([]byte(":"))
+	mac.Write([]byte(field))
+}
+
+// writePolicyIdentity binds both the public widget key and the identity of
+// the fingerprint variable. It intentionally excludes the verification
+// secret: an explicit clearance_key can survive secret_key rotation.
+func (ts *Turnstile) writePolicyIdentity(mac hash.Hash) {
+	writeMACField(mac, ts.SiteKey)
+	writeMACField(mac, ts.BindFingerprintVar)
+}
+
 // cookieName isolates different protection configurations, and (when bound)
 // every distinct JA4, not just the transport. This prevents browsers that
 // alternate TLS/ALPN profiles or protected routes from overwriting their
@@ -251,13 +276,10 @@ func (ts *Turnstile) fingerprint(r *http.Request) (string, bool) {
 func (ts *Turnstile) cookieName(fp string, bound bool) string {
 	mac := hmac.New(sha256.New, ts.key)
 	mac.Write([]byte(clearanceCookieLabel))
-	mac.Write([]byte(ts.SiteKey))
-	mac.Write([]byte{0})
+	ts.writePolicyIdentity(mac)
 	if bound {
 		mac.Write([]byte("bound\x00"))
-		mac.Write([]byte(ts.BindFingerprintVar))
-		mac.Write([]byte{0})
-		mac.Write([]byte(fp))
+		writeMACField(mac, fp)
 	} else {
 		mac.Write([]byte("unbound"))
 	}
@@ -276,7 +298,7 @@ func (ts *Turnstile) cleared(r *http.Request) bool {
 // mintClearance returns a clearance cookie value issued at the given time.
 func (ts *Turnstile) mintClearance(issued time.Time, r *http.Request) string {
 	iat := strconv.FormatInt(issued.Unix(), 10)
-	return "1." + iat + "." + base64.RawURLEncoding.EncodeToString(ts.clearanceMAC(iat, r))
+	return clearanceVersion + "." + iat + "." + base64.RawURLEncoding.EncodeToString(ts.clearanceMAC(iat, r))
 }
 
 // validClearance reports whether value is a clearance this handler issued
@@ -286,7 +308,7 @@ func (ts *Turnstile) validClearance(value string, r *http.Request) bool {
 		return false
 	}
 	version, rest, ok := strings.Cut(value, ".")
-	if !ok || version != "1" {
+	if !ok || version != clearanceVersion {
 		return false
 	}
 	iat, sig, ok := strings.Cut(rest, ".")
@@ -312,7 +334,8 @@ func (ts *Turnstile) validClearance(value string, r *http.Request) bool {
 
 func (ts *Turnstile) clearanceMAC(iat string, r *http.Request) []byte {
 	mac := hmac.New(sha256.New, ts.key)
-	mac.Write([]byte("1\x00"))
+	mac.Write([]byte(clearanceVersion + "\x00"))
+	ts.writePolicyIdentity(mac)
 	mac.Write([]byte(iat))
 	mac.Write([]byte{0})
 	mac.Write([]byte(requestHostname(r)))
@@ -492,7 +515,7 @@ func (ts *Turnstile) verify(w http.ResponseWriter, r *http.Request) error {
 		Expires:  now.Add(ts.ttl),
 		MaxAge:   int(ts.ttl / time.Second),
 		HttpOnly: true,
-		Secure:   r.TLS != nil,
+		Secure:   !ts.AllowInsecureCookie,
 		SameSite: http.SameSiteLaxMode,
 	})
 	ts.logger.Debug("turnstile clearance issued",

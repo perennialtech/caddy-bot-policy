@@ -453,7 +453,7 @@ func TestTurnstileClearanceValidation(t *testing.T) {
 	if ts.validClearance(forged, req) {
 		t.Error("clearance with an edited issue time accepted")
 	}
-	for _, junk := range []string{"", "1", "1.2", "2." + fresh[2:], fresh + "x", "1.abc." + parts[2]} {
+	for _, junk := range []string{"", "1", "1.2", "1." + strings.TrimPrefix(fresh, "2."), "3." + strings.TrimPrefix(fresh, "2."), fresh + "x", "2.abc." + parts[2]} {
 		if ts.validClearance(junk, req) {
 			t.Errorf("junk clearance %q accepted", junk)
 		}
@@ -614,12 +614,13 @@ func TestTurnstileCaddyfile(t *testing.T) {
 		cookie_name      cl
 		bind_fingerprint
 		max_pending_verifications 8
+		allow_insecure_cookie
 	}`)
 	var ts Turnstile
 	if err := ts.UnmarshalCaddyfile(d); err != nil {
 		t.Fatalf("UnmarshalCaddyfile: %v", err)
 	}
-	if ts.SiteKey != "sk" || ts.SecretKey != "sec" || ts.CookieName != "cl" || ts.MaxPendingVerifications != 8 {
+	if ts.SiteKey != "sk" || ts.SecretKey != "sec" || ts.CookieName != "cl" || ts.MaxPendingVerifications != 8 || !ts.AllowInsecureCookie {
 		t.Errorf("parsed %+v", ts)
 	}
 	if time.Duration(ts.ClearanceTTL) != 7*24*time.Hour {
@@ -646,6 +647,7 @@ func TestTurnstileCaddyfile(t *testing.T) {
 		"turnstile {\nmax_pending_verifications 0\n}",
 		"turnstile {\nmax_pending_verifications lots\n}",
 		"turnstile {\nbind_fingerprint a b\n}",
+		"turnstile {\nallow_insecure_cookie yes\n}",
 		`turnstile inline`,
 	} {
 		var ts Turnstile
@@ -765,6 +767,99 @@ func TestTurnstileCookieNamesIsolateConfigurations(t *testing.T) {
 			}
 			if differentSecret.cookieName(fp, bound) == ca.Name {
 				t.Error("different default-derived signing keys share a cookie slot")
+			}
+		})
+	}
+}
+
+// Cookie names alone are not security boundaries: a client can put one
+// policy's signed value under another policy's cookie name. The MAC must
+// bind the policy identity, even with a deliberately shared clearance_key.
+func TestTurnstileClearanceMACIsolatesPolicy(t *testing.T) {
+	const sharedKey = "shared-clearance-signing-key-32-bytes"
+	for _, bound := range []bool{false, true} {
+		t.Run(fmt.Sprintf("bound=%t", bound), func(t *testing.T) {
+			newPolicy := func(siteKey, secretKey, varName string) *Turnstile {
+				t.Helper()
+				ts := &Turnstile{SiteKey: siteKey, SecretKey: secretKey, ClearanceKey: sharedKey, BindFingerprintVar: varName}
+				if err := ts.Provision(caddy.Context{}); err != nil {
+					t.Fatal(err)
+				}
+				return ts
+			}
+			varName, fp := "", ""
+			if bound {
+				varName, fp = "ja4", testFP
+			}
+			a := newPolicy("widget-a", "secret-a", varName)
+			b := newPolicy("widget-b", "secret-b", varName)
+			req := newTurnstileRequest(http.MethodGet, "/private", fp, nil)
+			signedByA := a.mintClearance(time.Now(), req)
+			if !a.validClearance(signedByA, req) {
+				t.Fatal("policy A rejected its own clearance")
+			}
+			if b.validClearance(signedByA, req) {
+				t.Error("policy B accepted policy A's value with the same clearance_key")
+			}
+			// Deliberately transplant A's value into B's cookie slot.
+			req.AddCookie(&http.Cookie{Name: b.cookieName(fp, bound), Value: signedByA})
+			if rec, reached := serve(t, b, req); rec.Code != http.StatusForbidden || reached {
+				t.Error("policy B accepted a value from policy A under B's cookie name")
+			}
+			// A stable clearance_key intentionally survives Turnstile
+			// secret_key rotation for the *same* widget.
+			rotated := newPolicy("widget-a", "rotated-secret", varName)
+			if !rotated.validClearance(signedByA, req) {
+				t.Error("secret_key rotation invalidated the existing clearance")
+			}
+			if bound {
+				// Same fingerprint under a different http.vars key also
+				// belongs to a different policy.
+				c := newPolicy("widget-a", "secret-a", "alternate")
+				otherReq := newTurnstileRequest(http.MethodGet, "/private", fp, nil)
+				caddyhttp.SetVar(otherReq.Context(), "alternate", fp)
+				if c.validClearance(signedByA, otherReq) {
+					t.Error("different fingerprint variable accepted another policy's clearance")
+				}
+				otherReq.AddCookie(&http.Cookie{Name: c.cookieName(fp, true), Value: signedByA})
+				if rec, reached := serve(t, c, otherReq); rec.Code != http.StatusForbidden || reached {
+					t.Error("different fingerprint variable accepted a transplanted clearance")
+				}
+			}
+		})
+	}
+}
+
+func TestTurnstileSecureCookiesBehindTLSProxy(t *testing.T) {
+	f := newFake(t, testHost, turnstileAction)
+	for _, tc := range []struct {
+		name, forwarded string
+		insecure        bool
+		wantSecure      bool
+	}{
+		{"tls terminated upstream", "https", false, true},
+		{"direct HTTP defaults secure", "", false, true},
+		{"untrusted forwarded HTTP does not downgrade", "http", false, true},
+		{"explicit HTTP-only development mode", "", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f.redeemed.Store(false)
+			ts := &Turnstile{SiteKey: testSiteKey, SecretKey: testSecretKey, AllowInsecureCookie: tc.insecure}
+			if err := ts.Provision(caddy.Context{}); err != nil {
+				t.Fatal(err)
+			}
+			r := newTurnstileRequest(http.MethodPost, "/", "", solve("good"))
+			r.TLS = nil // Caddy sees only the plain HTTP hop from a TLS proxy.
+			if tc.forwarded != "" {
+				r.Header.Set("X-Forwarded-Proto", tc.forwarded)
+			}
+			rec, _ := serve(t, ts, r)
+			if rec.Code != http.StatusSeeOther {
+				t.Fatalf("verify status = %d, want 303", rec.Code)
+			}
+			c := cookieFrom(rec, ts.cookieName("", false))
+			if c == nil || c.Secure != tc.wantSecure || !c.HttpOnly {
+				t.Errorf("cookie = %+v; want Secure=%t and HttpOnly", c, tc.wantSecure)
 			}
 		})
 	}

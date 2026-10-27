@@ -200,8 +200,11 @@ turnstile @browser {
 #### What a clearance is, and is not
 
 The clearance is a **stateless bearer token**: the cookie holds its issue
-time and an HMAC-SHA256 over that time, the hostname and (if bound) the
-fingerprint. There is no server-side store, so clearances survive restarts
+time and an HMAC-SHA256 over that time, the policy identity (site key and
+fingerprint variable), the hostname and (if bound) the fingerprint. A
+clearance from another policy is rejected even if both policies deliberately
+share a `clearance_key` and a client copies the value to the other cookie
+name. There is no server-side store, so clearances survive restarts
 and work across several Caddy instances that share the same keys. It is
 worth being precise about what that buys:
 
@@ -224,12 +227,21 @@ solver sharing its clearance with others. If that matters, shorten
 
 Expiry is checked against the issue time and the TTL configured *now*, so
 shortening `clearance_ttl` applies to existing cookies straight away. The
-cookie is `HttpOnly`, `SameSite=Lax`, `Secure` over HTTPS, and host-only.
+cookie is `HttpOnly`, `SameSite=Lax`, **always `Secure` by default**, and
+host-only. In particular, this is also true when Caddy receives HTTP from an
+upstream TLS-terminating proxy. The external hostname **must be HTTPS** for
+the browser to send its clearance back; configure TLS on the public-facing
+proxy and redirect public HTTP to HTTPS. Arbitrary `X-Forwarded-Proto` headers
+are not used to decide cookie security. For strictly HTTP-only local
+development, opt in with `allow_insecure_cookie` (never use it in production).
 The cookie name has a keyed suffix derived from the signing configuration
 and, when bound, the full fingerprint, so independent Turnstile policies
 on one host do not overwrite each other's clearances. Instances using the
 same signing key, site key, binding variable and cookie prefix intentionally
-share a cookie namespace. Browsers do not separate cookies by port.
+share a cookie namespace. Cookie values themselves also authenticate the
+policy; the cookie name is not a trust boundary. Version-1 clearance cookies
+issued by previous builds are invalidated by this change and will trigger a
+fresh challenge. Browsers do not separate cookies by port.
 
 #### Protecting the verification step
 
@@ -318,6 +330,7 @@ challenged paths, or make sure they allow the above.
 | `clearance_ttl` | duration (default `30d`) | How long a clearance stays valid after it is issued. Between `1m` and `400d` (the longest browsers keep a cookie). |
 | `clearance_key` | string of at least 32 bytes | Optional. Key that signs the cookie. By default one is derived from `secret_key`, which means **rotating the Turnstile secret invalidates every clearance**. Set this to rotate them independently. |
 | `cookie_name` | cookie prefix (default `bp_clearance`) | Prefix for a cookie name with a keyed configuration suffix and, when bound, a full-fingerprint suffix. Validated when the config loads. |
+| `allow_insecure_cookie` | no arguments (default off) | Issue clearance cookies without `Secure` for **HTTP-only local development**. Never enable on public sites or behind HTTPS-terminating proxies. |
 | `bind_fingerprint` | `[var_name]` (default `ja4`) | Ties the clearance to the client's JA4 fingerprint, read from `http.vars.<var_name>`. See below. |
 | `max_pending_verifications` | integer (default `64`) | Most siteverify calls this handler has in flight at once. See [Protecting the verification step](#protecting-the-verification-step). |
 

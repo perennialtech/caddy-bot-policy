@@ -86,6 +86,7 @@ func (bp *BotPolicy) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 //		cookie_name      bp_clearance
 //		bind_fingerprint [<var_name>]
 //		max_pending_verifications 64
+//		allow_insecure_cookie  # HTTP-only local development; never production
 //	}
 func parseTurnstileCaddyfile(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error) {
 	var ts Turnstile
@@ -112,6 +113,12 @@ func (ts *Turnstile) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				if d.NextArg() {
 					return d.ArgErr()
 				}
+				continue
+			case "allow_insecure_cookie":
+				if d.NextArg() {
+					return d.ArgErr()
+				}
+				ts.AllowInsecureCookie = true
 				continue
 			case "site_key", "secret_key", "clearance_key", "clearance_ttl", "cookie_name", "max_pending_verifications":
 			default:

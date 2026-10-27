@@ -197,7 +197,7 @@ func (c *trackedConn) sniff() {
 		}
 
 		fingerprint := hello.ja4(transportTCP)
-		conns.set(c.addr, fingerprint)
+		conns.setPair(c.addr, fingerprint, hello.ja4Bind(transportTCP))
 		c.debug("computed ja4", zap.String("remote_addr", c.addr), zap.String("ja4", fingerprint))
 		return
 	}

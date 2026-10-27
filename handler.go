@@ -1,6 +1,7 @@
 package botpolicy
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/caddyserver/caddy/v2"
@@ -29,6 +30,9 @@ type Handler struct {
 	// VarName is the http.vars.* key to publish the fingerprint under.
 	// Defaults to "ja4", making it available as {http.vars.ja4}.
 	VarName string `json:"var_name,omitempty"`
+	// BindVarName publishes the resumption-insensitive variant. It is not
+	// spec-exact JA4 and should not be used for a JA4 blocklist.
+	BindVarName string `json:"bind_var_name,omitempty"`
 
 	logger *zap.Logger
 }
@@ -47,6 +51,12 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 	if h.VarName == "" {
 		h.VarName = defaultVarName
 	}
+	if h.BindVarName == "" {
+		h.BindVarName = "ja4_bind"
+	}
+	if !varNamePattern.MatchString(h.VarName) || !varNamePattern.MatchString(h.BindVarName) || h.VarName == h.BindVarName {
+		return errors.New("ja4: var_name and bind_var_name must be distinct valid variable names")
+	}
 	return nil
 }
 
@@ -56,14 +66,18 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 // it to the empty string, so that {http.vars.ja4} renders as empty in logs
 // and bot_policy sees the same "missing" case either way.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
-	store := conns.get
+	store := conns.getPair
 	if r.ProtoMajor == 3 {
 		// HTTP/3: RemoteAddr is the client's UDP address, recorded by the
 		// ja4 packet conn wrapper from the QUIC Initial packets.
-		store = quicConns.get
+		store = quicConns.getPair
 	}
-	if fingerprint := store(normalizeAddr(r.RemoteAddr)); fingerprint != "" {
-		caddyhttp.SetVar(r.Context(), h.VarName, fingerprint)
+	fp := store(normalizeAddr(r.RemoteAddr))
+	if fp.ja4 != "" {
+		caddyhttp.SetVar(r.Context(), h.VarName, fp.ja4)
+	}
+	if fp.bind != "" {
+		caddyhttp.SetVar(r.Context(), h.BindVarName, fp.bind)
 	}
 	return next.ServeHTTP(w, r)
 }
@@ -75,12 +89,17 @@ func (h *Handler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 			return d.ArgErr()
 		}
 		for d.NextBlock(0) {
-			switch d.Val() {
-			case "var_name":
+			sub := d.Val()
+			switch sub {
+			case "var_name", "bind_var_name":
 				if !d.NextArg() {
 					return d.ArgErr()
 				}
-				h.VarName = d.Val()
+				if sub == "var_name" {
+					h.VarName = d.Val()
+				} else {
+					h.BindVarName = d.Val()
+				}
 				if d.NextArg() {
 					return d.ArgErr()
 				}

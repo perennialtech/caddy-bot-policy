@@ -28,6 +28,9 @@ const (
 	extSignatureAlgorithms = 0x000d
 	extALPN                = 0x0010
 	extSupportedVersions   = 0x002b
+	extPadding             = 0x0015
+	extPreSharedKey        = 0x0029
+	extEarlyData           = 0x002a
 )
 
 // Transport prefixes: JA4 distinguishes fingerprints taken over TCP from
@@ -70,8 +73,27 @@ func withoutGREASE(in []uint16) []uint16 {
 // ja4 builds the JA4 fingerprint for ch. transport is transportTCP or
 // transportQUIC.
 func (ch *clientHello) ja4(transport byte) string {
+	return ch.ja4WithExtensions(transport, ch.extensions)
+}
+
+// ja4Bind is deliberately NOT JA4: resuming a TLS/QUIC session introduces
+// pre_shared_key (and sometimes early_data), and may change ClientHello
+// padding. Those differences are connection state, not a different client
+// stack. Keep the spec-exact JA4 for matching/blocking, but omit these
+// unstable extensions when binding a long-lived clearance.
+func (ch *clientHello) ja4Bind(transport byte) string {
+	extensions := make([]uint16, 0, len(ch.extensions))
+	for _, ext := range ch.extensions {
+		if ext != extPreSharedKey && ext != extEarlyData && ext != extPadding {
+			extensions = append(extensions, ext)
+		}
+	}
+	return ch.ja4WithExtensions(transport, extensions)
+}
+
+func (ch *clientHello) ja4WithExtensions(transport byte, ext []uint16) string {
 	ciphers := withoutGREASE(ch.cipherSuites)
-	extensions := withoutGREASE(ch.extensions)
+	extensions := withoutGREASE(ext)
 
 	var a strings.Builder
 	a.WriteByte(transport)

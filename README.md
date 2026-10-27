@@ -12,7 +12,7 @@ The plugin provides five modules:
 |---|---|
 | `caddy.listeners.ja4` | Listener wrapper: reads the raw ClientHello and computes the JA4 (TCP: HTTP/1.1 and HTTP/2) |
 | `caddy.packetconns.ja4` | Packet conn wrapper: does the same from QUIC Initial packets (HTTP/3) |
-| `http.handlers.ja4` | Publishes that fingerprint as a request variable |
+| `http.handlers.ja4` | Publishes spec-exact `ja4` and a resumption-insensitive `ja4_bind` for clearance binding |
 | `http.handlers.bot_policy` | Blocks requests whose fingerprint is on the list |
 | `http.handlers.turnstile` | Requires a Turnstile clearance cookie, serving a challenge page without one |
 
@@ -65,7 +65,8 @@ simply arrive without a fingerprint. There is no `tls` placeholder to order
 against here: packet conn wrappers always run before QUIC. HTTP/3
 fingerprints start with `q` instead of `t`, so the same browser has a
 different JA4 over h3 than over h2 — block both if you mean to block a
-client.
+client. TLS resumption can also change spec-exact JA4; for a blocklist,
+observe and account for the full- and resumed-handshake variants.
 
 The `ja4`, `bot_policy` and `turnstile` directives order themselves (in that
 order, ahead of `redir` and any URL rewriting), so no global `order` lines
@@ -156,7 +157,8 @@ method-restricted route, use `method GET POST` alongside the path matcher,
 or place `turnstile` before the method-specific routing.
 
 Combined with the blocklist, known-bad fingerprints are refused outright and
-everyone else is challenged once a month:
+other visitors can reuse their clearance for up to 30 days per binding
+profile (subject to browser cookie retention and further fingerprint changes):
 
 ```caddyfile
 example.com {
@@ -213,9 +215,10 @@ worth being precise about what that buys:
 - **Replay resistance is limited.** A clearance is valid until it expires,
   from anything that presents it. Without binding, any client can reuse a
   cookie copied from a browser that solved the challenge. With
-  `bind_fingerprint`, it only works from a client with the same JA4.
-- **No client identity.** A JA4 identifies a *kind* of TLS client (a browser
-  version on a platform), not a device. A bot that solves the challenge in
+  `bind_fingerprint`, it only works from a client with the same stable
+  fingerprint profile; this is not cryptographic client authentication.
+- **No client identity.** A fingerprint identifies a *kind* of TLS client
+  (a browser version on a platform), not a device. A bot that solves the challenge in
   a real browser and replays the cookie from a client mimicking that
   browser's TLS stack passes, for the whole TTL.
 
@@ -293,13 +296,19 @@ The page's policy follows Cloudflare's recommended nonce-based setup:
 ```
 script-src 'nonce-…' 'strict-dynamic' https://challenges.cloudflare.com;
 frame-src https://challenges.cloudflare.com;
-object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'
+object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'self'
 ```
 
 with a fresh nonce on every response, so no `'unsafe-inline'` is needed. A
 `header` directive that sets its CSP with `defer` (or `>`) runs after the
-handler and would overwrite this policy. Keep deferred CSP headers off
-challenged paths, or make sure they allow the above.
+handler and would overwrite this policy. The same applies to a deferred
+`Cache-Control` header: setting `public` or a positive `max-age` after the
+handler may cache the challenge, even though it sets `no-store`. Keep
+deferred CSP and cache headers off challenged paths, or configure them to
+preserve these response protections. The challenge uses
+`Referrer-Policy: strict-origin-when-cross-origin`, so Cloudflare receives
+the origin but not the path or query. The `frame-ancestors 'self'` rule
+allows same-origin embedding, but disallows embedding from other origins.
 
 #### Things to know
 
@@ -312,6 +321,15 @@ challenged paths, or make sure they allow the above.
   visit is a GET, so this rarely matters.
 - **Search engine crawlers are challenged too.** Exclude them by matcher if
   you need them indexed.
+- **CORS preflights cannot pass.** Browsers don't attach clearance cookies
+  to cross-origin `OPTIONS` preflight requests. Exclude `OPTIONS` from the
+  challenge matcher (and handle CORS normally) if you protect credentialed
+  cross-origin requests.
+- **Shared caches need explicit protection.** A CDN or other cache in front
+  of Caddy must not serve cleared protected responses to clients that have
+  not cleared the challenge. Disable shared caching on protected paths or
+  enforce the same clearance policy at the caching layer. This handler only
+  controls challenge responses, not caches in front of it.
 - **Testing keys.** Cloudflare's
   [dummy keys](https://developers.cloudflare.com/turnstile/troubleshooting/testing/)
   work, for local development. Siteverify answers them with
@@ -331,14 +349,15 @@ challenged paths, or make sure they allow the above.
 | `clearance_key` | string of at least 32 bytes | Optional. Key that signs the cookie. By default one is derived from `secret_key`, which means **rotating the Turnstile secret invalidates every clearance**. Set this to rotate them independently. |
 | `cookie_name` | cookie prefix (default `bp_clearance`) | Prefix for a cookie name with a keyed configuration suffix and, when bound, a full-fingerprint suffix. Validated when the config loads. |
 | `allow_insecure_cookie` | no arguments (default off) | Issue clearance cookies without `Secure` for **HTTP-only local development**. Never enable on public sites or behind HTTPS-terminating proxies. |
-| `bind_fingerprint` | `[var_name]` (default `ja4`) | Ties the clearance to the client's JA4 fingerprint, read from `http.vars.<var_name>`. See below. |
+| `bind_fingerprint` | `[var_name]` (default `ja4_bind`) | Ties the clearance to the resumption-insensitive fingerprint, read from `http.vars.<var_name>`. See below. |
 | `max_pending_verifications` | integer (default `64`) | Most siteverify calls this handler has in flight at once. See [Protecting the verification step](#protecting-the-verification-step). |
 
 ### Binding the clearance to the fingerprint
 
 With `bind_fingerprint`, a clearance is only accepted from a client with the
-same JA4 it was issued to. A cookie copied out of a real browser and replayed
-from `curl` or a Python script presents a different TLS stack, so it is
+same resumption-insensitive fingerprint it was issued to. A cookie copied
+out of a real browser and replayed from `curl` or a Python script presents
+a different TLS stack, so it is
 rejected and that client is challenged again. See [What a clearance is, and
 is not](#what-a-clearance-is-and-is-not) for what this does not cover. It
 needs the `ja4` handler and listener wrapper set up as above (and the packet
@@ -347,13 +366,22 @@ conn wrapper, for HTTP/3).
 **A fingerprint is required.** With binding on, a request without one is
 never cleared, and a challenge solved from one is refused *before* calling
 Cloudflare, with a warning in the log. This happens when the listener or
-packet conn wrapper is missing, or when `var_name` does not match the `ja4`
-handler's. Without the requirement, a configuration mistake would quietly
+packet conn wrapper is missing, or when the `bind_fingerprint` argument does
+not match the `ja4` handler's `bind_var_name`. Without the requirement, a configuration mistake would quietly
 produce clearances that bind to nothing.
 
-**Each JA4 gets its own cookie.** This covers HTTP/2 versus HTTP/3 as well
-as multiple TLS/ALPN profiles on TCP. Changing fingerprints requires another
-solve, but revisiting an already-cleared fingerprint reuses its own cookie.
+**Each binding profile gets its own cookie.** The `ja4` handler publishes both
+`{http.vars.ja4}` (spec-exact, for blocklists and logs) and
+`{http.vars.ja4_bind}` (for Turnstile). The binding variant removes
+`pre_shared_key` (0x0029), `early_data` (0x002a) and `padding` (0x0015)
+from the extension count and hash, making it stable across the normal TLS
+1.3 full-to-resumed handshake transition. It is **not standard JA4** and
+must not be used as a JA4 blocklist entry. Explicitly configuring
+`bind_fingerprint ja4` retains exact-JA4 behavior, including a further
+challenge when a session resumes. The default may require new clearances
+after upgrading from earlier versions. HTTP/2 versus HTTP/3 and genuinely
+different TLS/ALPN profiles still get separate cookies; later changes to
+the fingerprint may still require another solve.
 Cookie names begin with `bp_clearance_` unless `cookie_name` is customised.
 
 ### `ja4` subdirectives
@@ -361,6 +389,7 @@ Cookie names begin with `bp_clearance_` unless `cookie_name` is customised.
 | Subdirective | Values | Description |
 |---|---|---|
 | `var_name` | variable name (default `ja4`) | The `http.vars.*` key the fingerprint is published under. |
+| `bind_var_name` | variable name (default `ja4_bind`) | The key for the resumption-insensitive variant; set this to match a custom `turnstile bind_fingerprint <var_name>`. Must differ from `var_name`. |
 
 ### Listener and packet conn wrapper options
 

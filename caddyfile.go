@@ -106,7 +106,7 @@ func (ts *Turnstile) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 			sub := d.Val()
 			switch sub {
 			case "bind_fingerprint":
-				ts.BindFingerprintVar = defaultVarName
+				ts.BindFingerprintVar = "ja4_bind"
 				if d.NextArg() {
 					ts.BindFingerprintVar = d.Val()
 				}

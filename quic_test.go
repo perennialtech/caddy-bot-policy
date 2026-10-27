@@ -187,6 +187,9 @@ func TestSnifferRFCInitial(t *testing.T) {
 		if got := store.get("192.0.2.1:4433"); got != rfcHelloJA4 {
 			t.Errorf("%s: fingerprint %q, want %q", file, got, rfcHelloJA4)
 		}
+		if bind := store.getBind("192.0.2.1:4433"); bind == "" {
+			t.Errorf("%s: QUIC Initial did not publish the binding fingerprint", file)
+		}
 	}
 }
 

@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
+	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"go.uber.org/zap"
 )
@@ -126,9 +127,9 @@ type Turnstile struct {
 	CookieName string `json:"cookie_name,omitempty"`
 
 	// BindFingerprintVar, if set, names the http.vars.* key holding the
-	// client's JA4 fingerprint (normally "ja4", published by the ja4
-	// handler). A clearance is then only issued to a request that has a
-	// fingerprint, and only accepted from a client with the same
+	// client's resumption-insensitive fingerprint (normally "ja4_bind",
+	// published by the ja4 handler). A clearance is only issued to a
+	// request that has a fingerprint, and accepted from a client with the same
 	// fingerprint. Requests without one are never cleared.
 	BindFingerprintVar string `json:"bind_fingerprint_var,omitempty"`
 
@@ -142,12 +143,13 @@ type Turnstile struct {
 	// The default is Secure even when Caddy receives HTTP from a TLS proxy.
 	AllowInsecureCookie bool `json:"allow_insecure_cookie,omitempty"`
 
-	key     []byte
-	ttl     time.Duration
-	pending chan struct{}
-	client  *http.Client
-	now     func() time.Time
-	logger  *zap.Logger
+	key            []byte
+	ttl            time.Duration
+	pending        chan struct{}
+	client         *http.Client
+	ownedTransport *http.Transport
+	now            func() time.Time
+	logger         *zap.Logger
 }
 
 // CaddyModule returns the Caddy module information.
@@ -219,10 +221,22 @@ func (ts *Turnstile) Provision(ctx caddy.Context) error {
 	ts.pending = make(chan struct{}, ts.MaxPendingVerifications)
 
 	if ts.client == nil {
-		ts.client = &http.Client{Timeout: 10 * time.Second}
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.MaxIdleConnsPerHost = ts.MaxPendingVerifications
+		transport.MaxIdleConns = max(transport.MaxIdleConns, ts.MaxPendingVerifications)
+		ts.client = &http.Client{Timeout: 10 * time.Second, Transport: transport}
+		ts.ownedTransport = transport
 	}
 	if ts.now == nil {
 		ts.now = time.Now
+	}
+	return nil
+}
+
+// Cleanup releases idle siteverify connections after Caddy unloads a config.
+func (ts *Turnstile) Cleanup() error {
+	if ts.ownedTransport != nil {
+		ts.ownedTransport.CloseIdleConnections()
 	}
 	return nil
 }
@@ -419,10 +433,11 @@ func setPageHeaders(w http.ResponseWriter) string {
 	h.Set("Content-Type", "text/html; charset=utf-8")
 	h.Set("Cache-Control", "no-store")
 	h.Set("X-Content-Type-Options", "nosniff")
-	h.Set("Referrer-Policy", "same-origin")
+	// Send the public origin (not the path or query) to the Turnstile origin.
+	h.Set("Referrer-Policy", "strict-origin-when-cross-origin")
 	h.Set("Content-Security-Policy", "script-src 'nonce-"+nonce+"' 'strict-dynamic' https://challenges.cloudflare.com; "+
 		"frame-src https://challenges.cloudflare.com; "+
-		"object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
+		"object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'self'")
 	return nonce
 }
 
@@ -580,7 +595,13 @@ func (ts *Turnstile) reject(w http.ResponseWriter, r *http.Request, reason strin
 			zap.String("token_action", result.Action),
 		)
 	}
-	ts.logger.Info("turnstile verification failed", fields...)
+	if result == nil {
+		// Requests rejected before siteverify are cheap for an attacker to
+		// generate; keep block IDs in the response without flooding info logs.
+		ts.logger.Debug("turnstile verification failed", fields...)
+	} else {
+		ts.logger.Info("turnstile verification failed", fields...)
+	}
 
 	w.Header().Set("X-Block-Id", id)
 	return ts.status(w, r, http.StatusForbidden, "Verification failed", "We couldn't verify your browser.", id)
@@ -659,5 +680,7 @@ func requestHostname(r *http.Request) string {
 // Interface guards.
 var (
 	_ caddy.Provisioner           = (*Turnstile)(nil)
+	_ caddy.CleanerUpper          = (*Turnstile)(nil)
 	_ caddyhttp.MiddlewareHandler = (*Turnstile)(nil)
+	_ caddyfile.Unmarshaler       = (*Turnstile)(nil)
 )

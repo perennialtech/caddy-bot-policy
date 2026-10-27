@@ -626,8 +626,8 @@ func TestTurnstileCaddyfile(t *testing.T) {
 	if time.Duration(ts.ClearanceTTL) != 7*24*time.Hour {
 		t.Errorf("clearance_ttl = %v, want 7 days", time.Duration(ts.ClearanceTTL))
 	}
-	if ts.BindFingerprintVar != "ja4" {
-		t.Errorf("bare bind_fingerprint should bind to ja4, got %q", ts.BindFingerprintVar)
+	if ts.BindFingerprintVar != "ja4_bind" {
+		t.Errorf("bare bind_fingerprint should bind to ja4_bind, got %q", ts.BindFingerprintVar)
 	}
 
 	d = caddyfile.NewTestDispenser(`turnstile {

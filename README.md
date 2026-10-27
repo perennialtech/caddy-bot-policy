@@ -1,25 +1,25 @@
 # caddy-bot-policy
 
-Plugin de [Caddy](https://caddyserver.com) que calcula la huella TLS de cliente
-**JA4** y bloquea peticiones cuya huella esté en una lista de bloqueo.
+A [Caddy](https://caddyserver.com) plugin that computes the **JA4** TLS client
+fingerprint and blocks requests whose fingerprint is on a blocklist.
 
-El módulo aporta tres piezas:
+The plugin provides three modules:
 
-| Módulo | Qué hace |
+| Module | What it does |
 |---|---|
-| `caddy.listeners.ja4` | Listener wrapper: lee el ClientHello en crudo y calcula el JA4 |
-| `http.handlers.ja4` | Publica esa huella en una variable de petición |
-| `http.handlers.bot_policy` | Bloquea las peticiones cuya huella esté en la lista |
+| `caddy.listeners.ja4` | Listener wrapper: reads the raw ClientHello and computes the JA4 |
+| `http.handlers.ja4` | Publishes that fingerprint as a request variable |
+| `http.handlers.bot_policy` | Blocks requests whose fingerprint is on the list |
 
-Están separados porque el JA4 **solo puede calcularse antes de terminar el
-TLS** — una vez completado el handshake el ClientHello ya no existe, y
-`tls.ConnectionState` de Go solo expone el resultado negociado, no las listas
-de ciphers y extensiones ofrecidas de las que se construye la huella. La
-política, en cambio, solo puede aplicarse cuando ya hay una petición HTTP
-parseada. Las dos mitades se comunican a través de una variable, lo que además
-deja la huella disponible para `log_append` y para los matchers de Caddy.
+They are separate because a JA4 **can only be computed before TLS is
+terminated**. Once the handshake completes the ClientHello is gone, and Go's
+`tls.ConnectionState` only exposes the negotiated result, not the offered
+cipher and extension lists the fingerprint is built from. A policy, on the
+other hand, can only be applied once there is a parsed HTTP request. The two
+halves talk through a request variable, which also makes the fingerprint
+available to `log_append` and to Caddy's request matchers.
 
-## Configuración
+## Configuration
 
 ```caddyfile
 {
@@ -48,18 +48,18 @@ example.com {
 }
 ```
 
-**El wrapper `ja4` tiene que ir antes que `tls`** en `listener_wrappers`: es
-justo lo que le permite ver el handshake sin cifrar.
+**The `ja4` wrapper must come before `tls`** in `listener_wrappers`. That
+position is exactly what lets it see the handshake before it is encrypted.
 
-Las directivas `ja4` y `bot_policy` se auto-ordenan (`ja4` primero), así que no
-hacen falta líneas `order` globales salvo que convivan con otras directivas de
-terceros que necesiten un orden concreto.
+The `ja4` and `bot_policy` directives order themselves (`ja4` first), so no
+global `order` lines are needed unless they share a route with other
+third-party directives that need a specific order.
 
-### Solo observar, sin bloquear
+### Observe only, without blocking
 
-`ja4` funciona por su cuenta. Es la forma sensata de empezar: publicas la
-huella, la vuelcas al log y construyes la lista de bloqueo con datos reales
-antes de bloquear nada.
+`ja4` works on its own. This is the sensible way to start: publish the
+fingerprint, write it to the access log, and build your blocklist from real
+data before blocking anything.
 
 ```caddyfile
 example.com {
@@ -73,68 +73,89 @@ example.com {
 }
 ```
 
-### Subdirectivas de `ja4`
+### Passing the fingerprint upstream
 
-| Subdirectiva | Valores | Descripción |
+To hand the fingerprint to your application, set it as a request header in
+`reverse_proxy`:
+
+```caddyfile
+example.com {
+	ja4
+	reverse_proxy localhost:8080 {
+		header_up X-JA4 {http.vars.ja4}
+	}
+}
+```
+
+`header_up` replaces any `X-JA4` header the client sent, including when no
+fingerprint is available (the header is then sent empty), so upstreams can
+trust it as long as they are only reachable through Caddy. Treat an empty
+value as "unknown", not as suspicious.
+
+### `ja4` subdirectives
+
+| Subdirective | Values | Description |
 |---|---|---|
-| `var_name` | nombre de variable (por defecto `ja4`) | Clave `http.vars.*` donde se publica la huella. |
+| `var_name` | variable name (default `ja4`) | The `http.vars.*` key the fingerprint is published under. |
 
-### Opciones del listener wrapper
+### Listener wrapper options
 
-| Opción | Valores | Descripción |
+| Option | Values | Description |
 |---|---|---|
-| `max_capture_bytes` | entero (por defecto `16384`) | Cuántos bytes puede bufferear como máximo esperando al ClientHello. Un registro TLS no pasa de 16 KiB; los hellos con claves post-cuánticas ya superan los 2 KiB. |
+| `max_capture_bytes` | integer (default `16384`) | The most bytes that may be buffered while waiting for the ClientHello. A single TLS record tops out at 16 KiB; hellos carrying post-quantum key shares already exceed 2 KiB. |
 
-### Subdirectivas de `bot_policy`
+### `bot_policy` subdirectives
 
-| Subdirectiva | Valores | Descripción |
+| Subdirective | Values | Description |
 |---|---|---|
-| `var_name` | nombre de variable (por defecto `ja4`) | Debe coincidir con el `var_name` de la directiva `ja4`. |
-| `block` | huella JA4 | Repetible; admite varios valores en la misma línea. Se requiere al menos una. |
-| `on_missing_fingerprint` | `open` \| `closed` (por defecto `open`) | Qué hacer cuando no hay huella: sin TLS, sobre HTTP/3, o un ClientHello ilegible. `open` deja pasar, `closed` bloquea. |
-| `action` | `block-403` (único valor soportado) | 403 + cabecera `X-Block-Id` con identificador único (prefijo `bp-`, distinto del `np-` de `network_policy`) y log de la petición bloqueada. |
+| `var_name` | variable name (default `ja4`) | Must match the `var_name` of the `ja4` directive. |
+| `block` | JA4 fingerprint | Repeatable; several values may be given on one line. At least one is required. |
+| `on_missing_fingerprint` | `open` \| `closed` (default `open`) | What to do when there is no fingerprint: no TLS, HTTP/3, or an unreadable ClientHello. `open` lets the request through, `closed` blocks it. |
+| `action` | `block-403` (the only supported value) | Responds 403 with an `X-Block-Id` header carrying a unique ID (prefixed `bp-`, distinct from `network_policy`'s `np-`) and logs the blocked request. |
 
-## Limitaciones
+## Limitations
 
-- **HTTP/3 no se huella.** Los listener wrappers de Caddy solo envuelven
-  listeners TCP; en QUIC el ClientHello viaja dentro de paquetes Initial. Las
-  peticiones que llegan por h3 alcanzan `bot_policy` con la variable vacía y se
-  resuelven por `on_missing_fingerprint`.
-- **PROXY protocol.** Si Caddy está detrás de un balanceador que habla PROXY
-  protocol, su cabecera va por delante del ClientHello en el cable. El wrapper
-  que la decodifica tiene que ir **antes** que `ja4` en `listener_wrappers`, o
-  `ja4` verá la cabecera PROXY en lugar de un registro TLS y no calculará nada.
-- **Coincidencia exacta.** No hay comodines ni coincidencia por prefijo.
+- **HTTP/3 is not fingerprinted.** Caddy's listener wrappers only wrap TCP
+  listeners; over QUIC the ClientHello travels inside Initial packets.
+  Requests arriving over h3 reach `bot_policy` with an empty variable and are
+  resolved by `on_missing_fingerprint`.
+- **PROXY protocol.** If Caddy sits behind a load balancer that speaks the
+  PROXY protocol, its header precedes the ClientHello on the wire. The wrapper
+  that decodes it must come **before** `ja4` in `listener_wrappers`, or `ja4`
+  will see the PROXY header instead of a TLS record and compute nothing.
+- **Exact matching.** There are no wildcards or prefix matches.
 
-## Sobre la implementación de JA4
+## About the JA4 implementation
 
-El fingerprint sigue la especificación de
-[FoxIO](https://github.com/FoxIO-LLC/ja4): `a_b_c`, donde `a` es legible
-(transporte, versión TLS, presencia de SNI, número de ciphers y extensiones,
-ALPN), y `b` y `c` son SHA-256 truncados a 12 caracteres de la lista ordenada
-de ciphers y de la lista ordenada de extensiones más los algoritmos de firma en
-orden de emisión.
+The fingerprint follows the [FoxIO](https://github.com/FoxIO-LLC/ja4)
+specification: `a_b_c`, where `a` is human-readable (transport, TLS version,
+SNI presence, cipher and extension counts, ALPN), and `b` and `c` are SHA-256
+hashes, truncated to 12 characters, of the sorted cipher list and of the
+sorted extension list plus the signature algorithms in the order sent.
 
-Detalles que importan y son fáciles de equivocar:
+Details that matter and are easy to get wrong:
 
-- Los valores **GREASE** (RFC 8701) se descartan de todas las listas. Varían en
-  cada conexión, así que dejarlos daría una huella distinta por handshake.
-- La **versión** se toma de la extensión `supported_versions` cuando está
-  presente, no del campo `legacy_version`, que TLS 1.3 congeló en `0x0303`.
-- **SNI y ALPN se cuentan** en el número de extensiones de la parte `a` pero se
-  **excluyen** del hash de la parte `c`: ya están representados ahí, y varían
-  según el sitio visitado en lugar de según el cliente.
-- Los **algoritmos de firma no se ordenan**: su orden es preferencia del
-  cliente y lleva señal.
-- El código ALPN son el primer y **último** carácter del primer protocolo
-  ofrecido — `http/1.1` da `h1`, no `ht`.
+- **GREASE** values (RFC 8701) are dropped from every list. They change on
+  every connection, so keeping them would give a different fingerprint per
+  handshake.
+- The **version** comes from the `supported_versions` extension when present,
+  not from the `legacy_version` field, which TLS 1.3 froze at `0x0303`.
+- **SNI and ALPN are counted** in the extension count in part `a`, but are
+  **excluded** from the part `c` hash: they are already represented in `a`,
+  and they vary with the site being visited rather than with the client.
+- **Signature algorithms are not sorted**: their order is the client's
+  preference and carries signal.
+- The ALPN code is the first and **last** character of the first protocol
+  offered: `http/1.1` gives `h1`, not `ht`.
+- A ClientHello split across **several TLS records** is reassembled before
+  parsing, rather than fingerprinting a truncated first record.
 
-La implementación se contrastó contra `github.com/matt-/caddy-ja4` sobre
-handshakes reales de Go (TLS 1.2 y 1.3, con y sin SNI, con y sin ALPN), curl y
-`openssl s_client`. Las dos partes hash coinciden en todos los casos. Las dos
-diferencias encontradas están en la parte legible y son fallos de aquella
-implementación: reporta versión `13` para un cliente que solo ofrece TLS 1.2, y
-emite `ht` en lugar de `h1` para ALPN `http/1.1`.
+The implementation was checked against `github.com/matt-/caddy-ja4` on real
+handshakes from Go (TLS 1.2 and 1.3, with and without SNI, with and without
+ALPN), curl and `openssl s_client`. Both hash parts match in every case. The
+two differences found are in the readable part and are bugs in that
+implementation: it reports version `13` for a client that only offers TLS 1.2,
+and it emits `ht` instead of `h1` for the `http/1.1` ALPN.
 
 ## Build
 
@@ -142,12 +163,12 @@ emite `ht` en lugar de `h1` para ALPN `http/1.1`.
 xcaddy build --with github.com/carbans/caddy-bot-policy
 ```
 
-Los IDs de módulo `caddy.listeners.ja4` y `http.handlers.ja4` son los mismos que
-usa `github.com/matt-/caddy-ja4`, así que **los dos plugins no pueden convivir
-en el mismo binario**: Caddy entra en pánico al arrancar con
-`module already registered`. Este módulo lo sustituye por completo.
+The module IDs `caddy.listeners.ja4` and `http.handlers.ja4` are the same ones
+used by `github.com/matt-/caddy-ja4`, so **the two plugins cannot be built into
+the same binary**: Caddy panics at startup with `module already registered`.
+This module replaces it entirely.
 
-## Desarrollo
+## Development
 
 ```sh
 go build ./...
@@ -155,16 +176,16 @@ go vet ./...
 go test ./...
 ```
 
-Los tests de política inyectan la huella directamente vía
-`caddyhttp.SetVar`/`VarsCtxKey`; los del fingerprint levantan un listener real y
-hacen handshakes de verdad con el cliente TLS de Go.
+The policy tests inject the fingerprint directly through
+`caddyhttp.SetVar`/`VarsCtxKey`; the fingerprint tests start a real listener
+and perform real handshakes with Go's TLS client.
 
-## Estado
+## Status
 
-- [x] Cálculo de JA4 sobre TCP/TLS (listener wrapper + handler)
-- [x] Coincidencia exacta por huella JA4
-- [x] `on_missing_fingerprint` open/closed por directiva
-- [x] Acción `block-403` con ID de bloqueo
-- [ ] JA4 sobre QUIC/HTTP3
-- [ ] Soporte de más acciones (p.ej. `redirect`, `tarpit`)
-- [ ] Coincidencia parcial/por prefijo de huella
+- [x] JA4 over TCP/TLS (listener wrapper + handler)
+- [x] Exact matching by JA4 fingerprint
+- [x] Per-directive `on_missing_fingerprint` open/closed
+- [x] `block-403` action with a block ID
+- [ ] JA4 over QUIC/HTTP3
+- [ ] More actions (e.g. `redirect`, `tarpit`)
+- [ ] Partial/prefix fingerprint matching

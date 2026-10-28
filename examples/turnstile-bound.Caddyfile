@@ -1,0 +1,23 @@
+{
+	servers {
+		# Fingerprint-bound clearance requires HTTP/1.1 or HTTP/2.
+		protocols h1 h2
+		listener_wrappers {
+			ja4
+			tls
+		}
+	}
+}
+
+example.com {
+	ja4
+	bot_policy {
+		block t13d1517h2_8daaf6152771_b6f405a00624
+	}
+	turnstile {
+		site_key {env.TURNSTILE_SITE_KEY}
+		secret_key {env.TURNSTILE_SECRET_KEY}
+		bind_fingerprint
+	}
+	reverse_proxy localhost:8080
+}

@@ -9,6 +9,7 @@
 	http_port 18080
 	https_port 18443
 	servers {
+		protocols h1 h2
 		listener_wrappers {
 			ja4
 			tls

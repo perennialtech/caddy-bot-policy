@@ -1,0 +1,17 @@
+{
+	servers {
+		listener_wrappers {
+			ja4
+			tls
+		}
+		packet_conn_wrappers {
+			ja4
+		}
+	}
+}
+
+example.com {
+	ja4
+	log_append client_ja4 {http.vars.ja4}
+	reverse_proxy localhost:8080
+}

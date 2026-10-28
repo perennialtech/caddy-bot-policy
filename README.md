@@ -48,6 +48,37 @@ option comments in [handler.go](handler.go), [policy.go](policy.go),
 [packetconn.go](packetconn.go). The source files also define the supported
 options and their validation.
 
+### Caddyfile options
+
+| Directive | Options |
+|---|---|
+| `ja4` | `var_name`, `bind_var_name` |
+| `bot_policy` | `block` (repeatable, required), `var_name`, `on_missing_fingerprint` (`open` or `closed`), `action` (`block-403`) |
+| `turnstile` | `site_key`, `secret_key` (required), `clearance_ttl`, `clearance_key`, `cookie_name`, `bind_fingerprint`, `max_pending_verifications`, `allow_insecure_cookie` |
+| TCP `listener_wrappers ja4`, UDP `packet_conn_wrappers ja4` | `max_capture_bytes` |
+
+Use `bind_fingerprint` with the variable name published by the `ja4`
+handler's `bind_var_name`; changing one requires changing the other.
+`{http.vars.ja4_bind}` is for clearance binding, not a spec-exact JA4
+blocklist. To pass a fingerprint upstream, use
+`header_up X-JA4 {http.vars.ja4}` within `reverse_proxy`, so a
+client-supplied header cannot override it.
+
+The `ja4`, `bot_policy` and `turnstile` directives run ahead of
+`rewrite` and `try_files` unless you place them in a `route`, whose
+order is explicit. Path-scoped Turnstile policies therefore match the
+original requested URL; protect any public rewrite aliases as well.
+For method-restricted matchers, include both GET and POST. Use matchers
+to exclude webhook, API and preflight paths rather than challenging them.
+
+Set `clearance_key` if the signing key must survive Turnstile secret
+rotation. A custom `cookie_name` sets the cookie namespace; the signed
+policy identity still prevents transplanting cookies between policies.
+`allow_insecure_cookie` is strictly for HTTP-only local development,
+**never** public deployments or deployments with upstream TLS termination.
+`max_pending_verifications` caps concurrent siteverify calls but is not
+a request rate limit.
+
 ## Operational requirements
 
 **Fingerprint-bound Turnstile must use HTTP/1.1 or HTTP/2 only.**

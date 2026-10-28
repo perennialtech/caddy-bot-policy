@@ -1,6 +1,7 @@
 package botpolicy
 
 import (
+	"bytes"
 	"net"
 	"sync"
 	"time"
@@ -117,6 +118,7 @@ type idleStore struct {
 type idleEntry struct {
 	fingerprints
 	seen time.Time
+	dcid []byte // completed QUIC ClientHello's connection identity
 }
 
 func newIdleStore(ttl time.Duration, max int) *idleStore {
@@ -138,6 +140,10 @@ func (s *idleStore) set(addr, fingerprint string) {
 }
 
 func (s *idleStore) setPair(addr, fingerprint, bind string) {
+	s.setPairWithDCID(addr, fingerprint, bind, nil)
+}
+
+func (s *idleStore) setPairWithDCID(addr, fingerprint, bind string, dcid []byte) {
 	if addr == "" || fingerprint == "" {
 		return
 	}
@@ -152,7 +158,16 @@ func (s *idleStore) setPair(addr, fingerprint, bind string) {
 	if _, exists := s.m[addr]; !exists && len(s.m) >= s.max {
 		return // full of live connections: fail open rather than evict them
 	}
-	s.m[addr] = idleEntry{fingerprints: fingerprints{ja4: fingerprint, bind: bind}, seen: now}
+	s.m[addr] = idleEntry{fingerprints: fingerprints{ja4: fingerprint, bind: bind}, seen: now, dcid: bytes.Clone(dcid)}
+}
+
+// sameDCID reports whether this Initial belongs to an already captured
+// connection. A new DCID must invalidate the previous address attribution.
+func (s *idleStore) sameDCID(addr string, dcid []byte) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.m[addr]
+	return ok && s.now().Sub(e.seen) <= s.ttl && e.dcid != nil && bytes.Equal(e.dcid, dcid)
 }
 
 func (s *idleStore) get(addr string) string {

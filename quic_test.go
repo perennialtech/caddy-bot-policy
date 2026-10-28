@@ -248,6 +248,47 @@ func TestSnifferReassemblesScatteredHello(t *testing.T) {
 	if len(s.pending) != 0 {
 		t.Errorf("%d pending hellos left after completion", len(s.pending))
 	}
+
+	// A delayed repeat of one partial Initial is not a new connection.
+	s.observe("192.0.2.1:5000", datagrams[0])
+	if got := store.get("192.0.2.1:5000"); got != want {
+		t.Fatalf("retransmission erased completed fingerprint: %q", got)
+	}
+	if len(s.pending) != 0 {
+		t.Fatal("retransmission started a second pending ClientHello")
+	}
+}
+
+func TestSnifferRetainsOnlyCryptoFrameBytes(t *testing.T) {
+	s, _ := newTestSniffer()
+	payload := make([]byte, 1200)
+	payload[600] = handshakeTypeClientHello
+	dcid := []byte{1, 2, 3, 4}
+	s.add("192.0.2.1:1234", quicInitial{
+		dcid:   dcid,
+		chunks: []cryptoChunk{{offset: 0, data: payload[600:601]}},
+	})
+	p := s.pending["192.0.2.1:1234"]
+	if p == nil || p.size != 1 || len(p.chunks) != 1 {
+		t.Fatalf("tiny fragment not retained correctly: %+v", p)
+	}
+	if &p.chunks[0].data[0] == &payload[600] {
+		t.Fatal("pending fragment still aliases the packet allocation")
+	}
+	payload[600] = 0
+	dcid[0] = 0
+	if p.chunks[0].data[0] != handshakeTypeClientHello || p.dcid[0] != 1 {
+		t.Fatal("retained state changed after the packet buffer was reused")
+	}
+
+	// Exercise the padded, encrypted Initial parsing path as well.
+	d := sealInitial(t, quicVersion1, rfcDCID, nil, 0,
+		padTo(cryptoFrame(0, []byte{handshakeTypeClientHello}), len(rfcDCID)))
+	s.observe("192.0.2.1:4321", d)
+	got := s.pending["192.0.2.1:4321"]
+	if got == nil || got.size != 1 || len(got.chunks[0].data) != 1 {
+		t.Fatalf("padded Initial retained more than its CRYPTO fragment: %+v", got)
+	}
 }
 
 // TestSnifferCoalescedPackets covers a datagram carrying the Initial

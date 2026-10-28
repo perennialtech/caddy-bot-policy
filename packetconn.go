@@ -109,25 +109,14 @@ type oobCapablePacketConn interface {
 
 // wrapPacketConn returns pc with its reads observed by s.
 //
-// When no wrapper is configured, Caddy hands quic-go the bare UDP socket
-// (it unwraps its own bookkeeping types first) so quic-go can batch reads
-// with recvmmsg and use GSO. A plain wrapper would hide the socket and
-// silently cost those optimisations, so when the socket is reachable the
-// wrapper re-exposes the same method set and observes batched reads too.
-// Close still goes to pc, so Caddy's listener reuse across config reloads
-// behaves exactly as it does without the wrapper.
+// The optimised path is safe only when pc itself exposes UDP/OOB methods.
+// Even Caddy's own Unwrap-capable listener can implement essential read
+// semantics (notably clearing a shutdown deadline during a reload).
+// Bypassing an outer wrapper to reach a UDP socket would skip those hooks.
 func wrapPacketConn(pc net.PacketConn, s *quicSniffer) net.PacketConn {
 	base := &sniffPacketConn{PacketConn: pc, sniffer: s}
 
-	raw := pc
-	for {
-		u, ok := raw.(interface{ Unwrap() net.PacketConn })
-		if !ok {
-			break
-		}
-		raw = u.Unwrap()
-	}
-	if oob, ok := raw.(oobCapablePacketConn); ok {
+	if oob, ok := pc.(oobCapablePacketConn); ok {
 		return &sniffOOBPacketConn{
 			sniffPacketConn: base,
 			raw:             oob,
@@ -152,7 +141,7 @@ func (c *sniffPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
 }
 
 // sniffOOBPacketConn additionally provides quic-go's optimised read path,
-// reading from the underlying socket directly.
+// reading through the supplied OOB-capable packet conn.
 type sniffOOBPacketConn struct {
 	*sniffPacketConn
 	raw   oobCapablePacketConn

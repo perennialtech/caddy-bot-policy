@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -143,8 +144,8 @@ func TestPacketConnWrapperClosesThroughOuterConn(t *testing.T) {
 	defer udp.Close()
 	outer := &closeRecorder{PacketConn: udp}
 	wrapped := wrapPacketConn(outer, newQUICSniffer(defaultMaxCaptureBytes, newIdleStore(time.Hour, 10)))
-	if _, ok := wrapped.(*sniffOOBPacketConn); !ok {
-		t.Fatal("expected the optimised path once the socket is unwrapped")
+	if _, ok := wrapped.(*sniffOOBPacketConn); ok {
+		t.Fatal("unwrapping skipped the outer connection's I/O methods")
 	}
 	wrapped.Close()
 	if !outer.closed {
@@ -161,6 +162,129 @@ type closeRecorder struct {
 
 func (c *closeRecorder) Close() error           { c.closed = true; return nil }
 func (c *closeRecorder) Unwrap() net.PacketConn { return c.PacketConn }
+
+// deadlineRecoveryConn models Caddy's fakeClosePacketConn. A close interrupts
+// an old reader but the socket itself must remain usable by a new listener.
+type deadlineRecoveryConn struct {
+	net.PacketConn
+	closed  atomic.Bool
+	started chan struct{}
+}
+
+func (c *deadlineRecoveryConn) Unwrap() net.PacketConn { return c.PacketConn }
+func (c *deadlineRecoveryConn) Close() error {
+	c.closed.Store(true)
+	return c.SetReadDeadline(time.Now())
+}
+func (c *deadlineRecoveryConn) ReadFrom(p []byte) (int, net.Addr, error) {
+	if c.closed.Load() {
+		return 0, nil, net.ErrClosed
+	}
+	close(c.started)
+	n, addr, err := c.PacketConn.ReadFrom(p)
+	if err != nil && c.closed.Load() {
+		if e, ok := err.(net.Error); ok && e.Timeout() {
+			if resetErr := c.SetReadDeadline(time.Time{}); resetErr != nil {
+				return n, addr, resetErr
+			}
+		}
+	}
+	return n, addr, err
+}
+
+func TestPacketConnWrapperRetainsReloadDeadlineRecovery(t *testing.T) {
+	udp, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer udp.Close()
+	old := &deadlineRecoveryConn{PacketConn: udp, started: make(chan struct{})}
+	wrapped := wrapPacketConn(old, newQUICSniffer(defaultMaxCaptureBytes, newIdleStore(time.Hour, 10)))
+	if _, ok := wrapped.(*sniffOOBPacketConn); ok {
+		t.Fatal("optimized reads would bypass the reload deadline recovery")
+	}
+	readDone := make(chan error, 1)
+	go func() {
+		_, _, err := wrapped.ReadFrom(make([]byte, 1500))
+		readDone <- err
+	}()
+	<-old.started
+	if err := wrapped.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-readDone:
+		if err == nil {
+			t.Fatal("old read was not interrupted")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("old read did not stop after close")
+	}
+
+	// New listener shares the same UDP socket, as Caddy does on a reload.
+	next := wrapPacketConn(&closeRecorder{PacketConn: udp}, newQUICSniffer(defaultMaxCaptureBytes, newIdleStore(time.Hour, 10)))
+	if err := udp.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	sender, err := net.Dial("udp", udp.LocalAddr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sender.Close()
+	if _, err := sender.Write([]byte("after reload")); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 1500)
+	n, _, err := next.ReadFrom(buf)
+	if err != nil || string(buf[:n]) != "after reload" {
+		t.Fatalf("shared socket unusable after reload: n=%d err=%v", n, err)
+	}
+}
+
+type observingPacketConn struct {
+	net.PacketConn
+	reads, writes int
+}
+
+func (c *observingPacketConn) Unwrap() net.PacketConn { return c.PacketConn }
+func (c *observingPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
+	c.reads++
+	return c.PacketConn.ReadFrom(p)
+}
+func (c *observingPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
+	c.writes++
+	return c.PacketConn.WriteTo(p, addr)
+}
+
+func TestPacketConnWrapperPreservesOuterIO(t *testing.T) {
+	udp, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer udp.Close()
+	peer, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer peer.Close()
+	outer := &observingPacketConn{PacketConn: udp}
+	wrapped := wrapPacketConn(outer, newQUICSniffer(defaultMaxCaptureBytes, newIdleStore(time.Hour, 10)))
+	if _, err := peer.WriteTo([]byte("inbound"), udp.LocalAddr()); err != nil {
+		t.Fatal(err)
+	}
+	if err := udp.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := wrapped.ReadFrom(make([]byte, 128)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wrapped.WriteTo([]byte("outbound"), peer.LocalAddr()); err != nil {
+		t.Fatal(err)
+	}
+	if outer.reads != 1 || outer.writes != 1 {
+		t.Fatalf("outer I/O was bypassed: reads=%d writes=%d", outer.reads, outer.writes)
+	}
+}
 
 func TestHandlerUsesQUICFingerprintForHTTP3(t *testing.T) {
 	const addr = "198.51.100.7:4433"

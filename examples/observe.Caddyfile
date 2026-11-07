@@ -12,6 +12,7 @@
 
 example.com {
 	ja4
+	log
 	log_append client_ja4 {http.vars.ja4}
 	reverse_proxy localhost:8080
 }

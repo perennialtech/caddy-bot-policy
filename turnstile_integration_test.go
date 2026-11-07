@@ -525,3 +525,33 @@ func TestIntegrationOnMissingFingerprintClosedRejectsSpoofedVar(t *testing.T) {
 			resp.StatusCode, resp.Header.Get("X-Block-Id"))
 	}
 }
+
+func TestIntegrationBotPolicyCacheControl(t *testing.T) {
+	for _, tt := range []struct {
+		onMissing string
+		status    int
+		cache     string
+	}{
+		{"closed", http.StatusForbidden, "no-store"},
+		{"open", http.StatusOK, "public, max-age=3600"},
+	} {
+		t.Run(tt.onMissing, func(t *testing.T) {
+			base := startCaddy(t, `
+                header /assets/* Cache-Control "public, max-age=3600"
+                ja4
+                bot_policy {
+                    block t13d1517h2_8daaf6152771_b6f405a00624
+                    on_missing_fingerprint `+tt.onMissing+`
+                }
+                respond "asset"
+            `)
+			resp, _ := newVisitor(t, base).get("/assets/app.css")
+			if resp.StatusCode != tt.status {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, tt.status)
+			}
+			if got := resp.Header.Get("Cache-Control"); got != tt.cache {
+				t.Errorf("Cache-Control = %q, want %q", got, tt.cache)
+			}
+		})
+	}
+}

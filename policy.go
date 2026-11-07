@@ -139,6 +139,7 @@ func (bp *BotPolicy) block(w http.ResponseWriter, r *http.Request, fingerprint s
 		zap.String("uri", r.RequestURI),
 	)
 
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Block-Id", id)
 	w.WriteHeader(http.StatusForbidden)
 	fmt.Fprintf(w, "403 Forbidden (block id: %s)\n", id)

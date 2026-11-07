@@ -193,12 +193,12 @@ func TestParseClientHelloTruncated(t *testing.T) {
 
 func TestHandshakeBodySingleRecord(t *testing.T) {
 	raw := fullHello().records(0)
-	body, need, err := handshakeBody(raw)
+	body, need, err := new(handshakeAssembler).read(raw)
 	if err != nil {
-		t.Fatalf("handshakeBody() error = %v (need %d)", err, need)
+		t.Fatalf("handshakeAssembler.read() error = %v (need %d)", err, need)
 	}
 	if !bytes.Equal(body, fullHello().body()) {
-		t.Error("handshakeBody() returned a body that differs from the hello")
+		t.Error("handshakeAssembler.read() returned a body that differs from the hello")
 	}
 }
 
@@ -206,20 +206,20 @@ func TestHandshakeBodySingleRecord(t *testing.T) {
 // records, which is legal and does happen with large post-quantum hellos.
 func TestHandshakeBodyFragmented(t *testing.T) {
 	raw := fullHello().records(16)
-	body, need, err := handshakeBody(raw)
+	body, need, err := new(handshakeAssembler).read(raw)
 	if err != nil {
-		t.Fatalf("handshakeBody() error = %v (need %d)", err, need)
+		t.Fatalf("handshakeAssembler.read() error = %v (need %d)", err, need)
 	}
 	if !bytes.Equal(body, fullHello().body()) {
-		t.Error("handshakeBody() did not reassemble the fragmented hello")
+		t.Error("handshakeAssembler.read() did not reassemble the fragmented hello")
 	}
 }
 
 func TestHandshakeBodyAsksForMoreWhenShort(t *testing.T) {
 	raw := fullHello().records(0)
-	_, need, err := handshakeBody(raw[:10])
+	_, need, err := new(handshakeAssembler).read(raw[:10])
 	if err == nil {
-		t.Fatal("handshakeBody() on a short buffer succeeded, want error")
+		t.Fatal("handshakeAssembler.read() on a short buffer succeeded, want error")
 	}
 	if need <= 10 {
 		t.Errorf("need = %d, want more than the 10 bytes supplied", need)
@@ -227,9 +227,9 @@ func TestHandshakeBodyAsksForMoreWhenShort(t *testing.T) {
 }
 
 func TestHandshakeBodyRejectsNonTLS(t *testing.T) {
-	_, need, err := handshakeBody([]byte("GET / HTTP/1.1\r\n\r\n"))
+	_, need, err := new(handshakeAssembler).read([]byte("GET / HTTP/1.1\r\n\r\n"))
 	if err == nil {
-		t.Fatal("handshakeBody() accepted plain HTTP, want error")
+		t.Fatal("handshakeAssembler.read() accepted plain HTTP, want error")
 	}
 	if need != 0 {
 		t.Errorf("need = %d, want 0 — plain HTTP is never going to become a hello", need)

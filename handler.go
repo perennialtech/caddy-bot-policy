@@ -23,9 +23,9 @@ type observedFingerprint struct {
 
 type observedFingerprintKey struct{}
 
-// Handler publishes the JA4 fingerprint captured by the ja4 listener wrapper
-// into a request variable, so that it can be read by bot_policy, matched on,
-// or written to the access log with log_append.
+// Handler publishes captured fingerprints as request variables for matchers
+// and access logs, and as a package-private observation for bot_policy and
+// bound clearances.
 //
 // It is a separate directive from bot_policy on purpose: a site can run the
 // ja4 handler alone to observe fingerprints without blocking anything, which
@@ -37,7 +37,7 @@ type observedFingerprintKey struct{}
 //
 // The listener wrapper must be configured too — see ListenerWrapper — and,
 // for HTTP/3, the packet conn wrapper (PacketConnWrapper). Without them the
-// variable is simply never set.
+// handler overwrites both fingerprint variables with empty strings.
 type Handler struct {
 	// VarName is the http.vars.* key to publish the fingerprint under.
 	// Defaults to "ja4", making it available as {http.vars.ja4}.

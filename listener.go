@@ -170,6 +170,7 @@ func (c *trackedConn) Close() error {
 // fingerprint, which bot_policy then resolves through
 // on_missing_fingerprint.
 func (c *trackedConn) sniff() {
+	var assembler handshakeAssembler
 	need := recordHeaderLen
 	for {
 		if need > c.max {
@@ -186,7 +187,7 @@ func (c *trackedConn) sniff() {
 			}
 		}
 
-		body, more, err := handshakeBody(buf)
+		body, more, err := assembler.read(buf)
 		if err != nil {
 			if more == 0 || more <= need {
 				// Not a client hello, or no way to make progress.

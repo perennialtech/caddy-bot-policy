@@ -139,16 +139,17 @@ func (bp *BotPolicy) block(w http.ResponseWriter, r *http.Request, fingerprint s
 		zap.String("uri", r.RequestURI),
 	)
 
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Block-Id", id)
 	w.WriteHeader(http.StatusForbidden)
 	fmt.Fprintf(w, "403 Forbidden (block id: %s)\n", id)
 	return nil
 }
 
-// newBlockID returns a short random ID, with a prefix naming the handler that
+// newBlockID returns a random ID, with a prefix naming the handler that
 // blocked the request, for matching a user's report to a log line.
 func newBlockID(prefix string) string {
-	var b [4]byte
+	var b [16]byte
 	_, _ = rand.Read(b[:])
 	return prefix + hex.EncodeToString(b[:])
 }

@@ -2,8 +2,10 @@ package botpolicy
 
 import (
 	"context"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/caddyserver/caddy/v2"
@@ -128,5 +130,18 @@ func TestServeHTTPIgnoresRequestVariable(t *testing.T) {
 	}
 	if rec.Code != http.StatusOK {
 		t.Fatalf("blocked on a request variable the ja4 handler did not publish: %d", rec.Code)
+	}
+}
+
+func TestBlockIDFormat(t *testing.T) {
+	for _, prefix := range []string{"bp-", "ts-"} {
+		id := newBlockID(prefix)
+		suffix, ok := strings.CutPrefix(id, prefix)
+		if !ok || len(suffix) != 32 {
+			t.Fatalf("block ID %q: want %s followed by 32 hex characters", id, prefix)
+		}
+		if _, err := hex.DecodeString(suffix); err != nil {
+			t.Fatalf("block ID %q: %v", id, err)
+		}
 	}
 }

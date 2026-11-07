@@ -15,8 +15,10 @@
 //
 // The split exists because a JA4 can only be computed before TLS is
 // terminated, while policy can only be applied once the request is parsed.
-// The two halves meet through a request variable, which also makes the
-// fingerprint available to log_append and to request matchers.
+// The ja4 handler records the observation in a package-private request
+// context value for policy enforcement and clearance binding. It also
+// exports request variables for log_append and request matchers; those
+// mutable variables are not trusted for enforcement.
 //
 // Minimal configuration:
 //
@@ -43,8 +45,7 @@ import (
 	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
 )
 
-// defaultVarName is the http.vars.* key the fingerprint is published under,
-// and the one bot_policy reads by default.
+// defaultVarName names the fingerprint for publication and policy matching.
 const defaultVarName = "ja4"
 
 func init() {

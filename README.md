@@ -50,21 +50,11 @@ For a combined policy with binding, start with
 Replace the example blocklist entry and upstream, and supply
 `TURNSTILE_SITE_KEY` and `TURNSTILE_SECRET_KEY`.
 
-The canonical configuration reference is the module's Caddyfile parser and
-option comments in [handler.go](handler.go), [policy.go](policy.go),
-[turnstile.go](turnstile.go), [listener.go](listener.go) and
-[packetconn.go](packetconn.go). The source files also define the supported
-options and their validation.
-
-### Caddyfile options
-
-| Directive | Options |
-|---|---|
-| `ja4` | `var_name`, `bind_var_name` |
-| `bot_policy` | `block` (repeatable, required), `var_name`, `on_missing_fingerprint` (`open` or `closed`), `action` (`block-403`) |
-| `turnstile` | `site_key`, `secret_key` (required), `clearance_ttl`, `clearance_key`, `cookie_name`, `bind_fingerprint`, `max_pending_verifications`, `allow_insecure_cookie` |
-| TCP `listener_wrappers ja4` | `max_capture_bytes` |
-| UDP `packet_conn_wrappers ja4` | none |
+The canonical configuration reference is the Caddyfile parser in
+[caddyfile.go](caddyfile.go) and the option comments in
+[handler.go](handler.go), [policy.go](policy.go), [turnstile.go](turnstile.go),
+[listener.go](listener.go) and [packetconn.go](packetconn.go). The wrapper
+parsers live alongside their option comments.
 
 Use `bind_fingerprint` with the variable name published by the `ja4`
 handler's `bind_var_name`; changing one requires changing the other.
@@ -79,14 +69,6 @@ order is explicit. Path-scoped Turnstile policies therefore match the
 original requested URL; protect any public rewrite aliases as well.
 For method-restricted matchers, include both GET and POST. Use matchers
 to exclude webhook, API and preflight paths rather than challenging them.
-
-Set `clearance_key` if the signing key must survive Turnstile secret
-rotation. A custom `cookie_name` sets the cookie namespace; the signed
-policy identity still prevents transplanting cookies between policies.
-`allow_insecure_cookie` is strictly for HTTP-only local development,
-**never** public deployments or deployments with upstream TLS termination.
-`max_pending_verifications` caps concurrent siteverify calls but is not
-a request rate limit.
 
 ## Operational requirements
 
@@ -111,7 +93,7 @@ challenged URL, then redirects to it with GET. Rewrites, GET-only matchers,
 and routes must admit the verification POST. Protect the siteverify endpoint
 from excessive submissions with an appropriate upstream rate limit.
 Deferred response headers must not override the challenge page's CSP or
-`Cache-Control: no-store`.
+`Cache-Control: no-store` on challenge and block responses.
 
 **Do not share-cache cleared pages without enforcing the same policy.**
 A CDN or reverse proxy in front of Caddy can otherwise serve a protected
@@ -122,14 +104,15 @@ paths, or enforce clearance at that cache.
 OPTIONS preflights, and clients without JavaScript cannot solve the widget;
 exclude appropriate paths using matchers. Challenging a POST loses its body
 after the verification redirect. Public HTTPS is required for secure cookies,
-including when TLS terminates at an upstream proxy. If a PROXY-protocol
+including when TLS terminates at an upstream proxy. Fingerprints identify
+Caddy's TLS peer: a TLS-terminating proxy supplies its own fingerprint when
+it uses TLS to Caddy, or no fingerprint over plaintext. If a PROXY-protocol
 listener wrapper is used, put it before `ja4` so the TLS ClientHello is
 visible.
 
 ## Development and testing
 
-CI runs `gofmt`, `go mod tidy -diff`, `go vet ./...`, and
-`go test -race -count=1 ./...`.
+Run the gates defined in [.github/workflows/ci.yml](.github/workflows/ci.yml).
 
 `test/browser/` contains an optional browser integration test against
 Cloudflare's public Turnstile testing keys. Its `run.py` explains the

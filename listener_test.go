@@ -1,6 +1,7 @@
 package botpolicy
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -128,6 +129,50 @@ func TestListenerEvictsOnClose(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Error("fingerprint still cached after the connection closed")
+}
+
+// readAfterCloseConn supplies a buffered hello even when Close occurs during
+// Read, modeling an already-completed socket read processed after close.
+type readAfterCloseConn struct {
+	net.Conn
+	data    []byte
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (c *readAfterCloseConn) Read(p []byte) (int, error) {
+	close(c.entered)
+	<-c.release
+	return copy(p, c.data), nil
+}
+
+func TestListenerCloseDuringCaptureDoesNotRepublish(t *testing.T) {
+	body := fullHello().body()
+	msg := append([]byte{handshakeTypeClientHello, byte(len(body) >> 16), byte(len(body) >> 8), byte(len(body))}, body...)
+	record := append([]byte{0x16, 0x03, 0x01, byte(len(msg) >> 8), byte(len(msg))}, msg...)
+
+	a, b := net.Pipe()
+	defer b.Close()
+	source := &readAfterCloseConn{Conn: a, data: record, entered: make(chan struct{}), release: make(chan struct{})}
+	key := "close-before-capture|regression"
+	conns.delete(key)
+	t.Cleanup(func() { conns.delete(key) })
+	c := &trackedConn{Conn: source, reader: bufio.NewReaderSize(source, defaultMaxCaptureBytes), addr: key, max: defaultMaxCaptureBytes}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		buf := make([]byte, len(record))
+		_, _ = c.Read(buf)
+	}()
+	<-source.entered
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	close(source.release)
+	<-done
+	if got := conns.get(key); got != "" {
+		t.Fatalf("capture published after close: %q", got)
+	}
 }
 
 // TestListenerPassesThroughPlaintext makes sure wrapping a listener cannot

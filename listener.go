@@ -137,7 +137,8 @@ type trackedConn struct {
 	logger *zap.Logger
 
 	sniffOnce sync.Once
-	closeOnce sync.Once
+	stateMu   sync.Mutex
+	closed    bool
 }
 
 // Read computes the fingerprint on the first call, before handing any bytes
@@ -151,7 +152,12 @@ func (c *trackedConn) Read(p []byte) (int, error) {
 // Close drops the cache entry. Without this the table would grow for the
 // lifetime of the process.
 func (c *trackedConn) Close() error {
-	c.closeOnce.Do(func() { conns.delete(c.addr) })
+	c.stateMu.Lock()
+	if !c.closed {
+		c.closed = true
+		conns.delete(c.addr)
+	}
+	c.stateMu.Unlock()
 	return c.Conn.Close()
 }
 
@@ -197,7 +203,11 @@ func (c *trackedConn) sniff() {
 		}
 
 		fingerprint := hello.ja4(transportTCP)
-		conns.setPair(c.addr, fingerprint, hello.ja4Bind(transportTCP))
+		c.stateMu.Lock()
+		if !c.closed {
+			conns.setPair(c.addr, fingerprint, hello.ja4Bind(transportTCP))
+		}
+		c.stateMu.Unlock()
 		c.debug("computed ja4", zap.String("remote_addr", c.addr), zap.String("ja4", fingerprint))
 		return
 	}

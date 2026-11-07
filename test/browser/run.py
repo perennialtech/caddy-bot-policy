@@ -49,7 +49,14 @@ with sync_playwright() as p:
     browser = p.chromium.launch()
     ctx = browser.new_context(ignore_https_errors=True)
     page = ctx.new_page()
-    console, seq = [], []
+    console, seq, protocols = [], [], []
+    cdp = ctx.new_cdp_session(page)
+    cdp.send("Network.enable")
+    cdp.on(
+        "Network.responseReceived",
+        lambda event: protocols.append(event["response"].get("protocol", ""))
+        if event["response"]["url"].startswith(PASS) else None,
+    )
     page.on("console", lambda m: console.append(m.text))
     page.on("response", lambda r: seq.append((r.request.method, r.status)) if r.url.startswith(PASS) else None)
 
@@ -57,6 +64,8 @@ with sync_playwright() as p:
     page.get_by_text("protected content").wait_for(timeout=45000)
     check(page.url == PASS + "/deep/page?x=1&y=2", "returned to the original URL")
     check(seq == [("GET", 403), ("POST", 303), ("GET", 200)], f"challenge, verify, redirect: {seq}")
+    check(bool(protocols) and all(proto in ("h2", "http/1.1") for proto in protocols),
+          f"bound challenge uses only HTTP/1.1 or HTTP/2: {protocols}")
     check(not [m for m in console if "Content Security Policy" in m], "no CSP violations under a strict site policy")
 
     cookies = [c for c in ctx.cookies(PASS) if c["name"].startswith("bp_clearance")]

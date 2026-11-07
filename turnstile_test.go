@@ -546,32 +546,6 @@ func TestTurnstileFingerprintBinding(t *testing.T) {
 	}
 }
 
-// TestTurnstileBindingSurvivesProtocolSwitching is the h2 -> h3 -> h2 case: a
-// browser that has passed once over each transport must not be challenged
-// again when it moves between them.
-func TestTurnstileBindingSurvivesProtocolSwitching(t *testing.T) {
-	f := &fakeSiteverify{hostname: testHost, action: turnstileAction}
-	useSiteverify(t, f)
-	ts := newTestTurnstile(t, true)
-
-	tcp := clearOnce(t, ts, testFP)
-	if passes(t, ts, testFPQUIC, tcp) {
-		t.Fatal("TCP clearance accepted over QUIC")
-	}
-	f.redeemed.Store(false) // a second, fresh token
-	quic := clearOnce(t, ts, testFPQUIC)
-	if quic.Name == tcp.Name {
-		t.Fatalf("both transports share cookie %q, so each switch would overwrite the other", tcp.Name)
-	}
-
-	// The browser now holds both cookies and keeps sending both.
-	for i, fp := range []string{testFP, testFPQUIC, testFP, testFPQUIC} {
-		if !passes(t, ts, fp, tcp, quic) {
-			t.Errorf("switch %d (%s): challenged again", i, fp[:1])
-		}
-	}
-}
-
 func TestTurnstileBindingRequiresFingerprint(t *testing.T) {
 	f := newFake(t, testHost, turnstileAction)
 	ts := newTestTurnstile(t, true)

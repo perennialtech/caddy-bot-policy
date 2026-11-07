@@ -85,6 +85,12 @@ func (s *quicSniffer) add(key string, in quicInitial) {
 		if len(in.chunks) == 0 {
 			return // ACK-only Initial: nothing to assemble
 		}
+		// A completed ClientHello can be retransmitted after its pending
+		// fragments have been released. The completed DCID is retained with
+		// the fingerprint, not in another unbounded cache.
+		if s.store.sameDCID(key, in.dcid) {
+			return
+		}
 		// A different connection from this address must never inherit the
 		// previous one's fingerprint, even if its own hello turns out to be
 		// unreadable.
@@ -95,7 +101,7 @@ func (s *quicSniffer) add(key string, in quicInitial) {
 				return
 			}
 		}
-		p = &pendingHello{dcid: in.dcid, started: now}
+		p = &pendingHello{dcid: bytes.Clone(in.dcid), started: now}
 		s.pending[key] = p
 	}
 
@@ -105,7 +111,9 @@ func (s *quicSniffer) add(key string, in quicInitial) {
 			delete(s.pending, key) // too big to be a hello we are willing to hold
 			return
 		}
-		// The chunk aliases the decrypted payload, which is ours to keep.
+		// Keep only the CRYPTO bytes, not the whole decrypted and padded
+		// packet that the parser's slice refers to.
+		ch.data = bytes.Clone(ch.data)
 		p.chunks = append(p.chunks, ch)
 		p.size += len(ch.data)
 	}
@@ -119,7 +127,7 @@ func (s *quicSniffer) add(key string, in quicInitial) {
 	if err != nil {
 		return
 	}
-	s.store.setPair(key, hello.ja4(transportQUIC), hello.ja4Bind(transportQUIC))
+	s.store.setPairWithDCID(key, hello.ja4(transportQUIC), hello.ja4Bind(transportQUIC), in.dcid)
 }
 
 func (s *quicSniffer) sweepPendingLocked(now time.Time) {

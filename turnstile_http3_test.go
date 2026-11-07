@@ -44,6 +44,9 @@ func loadHTTP3Caddy(t *testing.T, dir string, port int, site string) {
 	persist_config off
 	auto_https disable_redirects
 	storage file_system %s
+	# Caddy's TLS app starts the storage cleaner after the QUIC listener
+	# is serving, which races handshakes under -race.
+	storage_clean_interval off
 	https_port %d
 	servers {
 		protocols h3

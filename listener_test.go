@@ -323,3 +323,63 @@ func selfSignedCert(t *testing.T) tls.Certificate {
 
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
 }
+
+func TestListenerFragmentedCapture(t *testing.T) {
+	hello := fullHello().extension(21, make([]byte, 1900)) // TLS padding
+	parsed, err := parseClientHello(hello.body())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, chunk := range []int{0, 64, 1} {
+		raw := hello.records(chunk)
+		key := "fragmented-capture"
+		c := &trackedConn{
+			reader: bufio.NewReaderSize(bytes.NewReader(raw), defaultMaxCaptureBytes),
+			addr:   key,
+			max:    defaultMaxCaptureBytes,
+		}
+		// Read invokes sniff once and must return the original wire bytes.
+		passed, err := io.ReadAll(c)
+		got := conns.getPair(key)
+		conns.delete(key)
+		if got.ja4 != parsed.ja4(transportTCP) || got.bind != parsed.ja4Bind(transportTCP) {
+			t.Errorf("chunk %d: captured fingerprints = %+v", chunk, got)
+		}
+		if err != nil || !bytes.Equal(passed, raw) {
+			t.Fatalf("chunk %d: capture changed the stream: %v", chunk, err)
+		}
+	}
+}
+
+func BenchmarkListenerSniff(b *testing.B) {
+	hello := fullHello().extension(21, make([]byte, 1900)) // TLS padding
+	for _, tt := range []struct {
+		name  string
+		chunk int
+	}{
+		{"single_record", 0},
+		{"64_byte_records", 64},
+		{"1_byte_records", 1},
+	} {
+		b.Run(tt.name, func(b *testing.B) {
+			raw := hello.records(tt.chunk)
+			const key = "benchmark-sniff"
+			b.Cleanup(func() { conns.delete(key) })
+			b.ReportAllocs()
+			b.SetBytes(int64(len(raw)))
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				c := &trackedConn{
+					reader: bufio.NewReaderSize(bytes.NewReader(raw), defaultMaxCaptureBytes),
+					addr:   key,
+					max:    defaultMaxCaptureBytes,
+				}
+				c.sniff()
+			}
+			b.StopTimer()
+			if conns.get(key) == "" {
+				b.Fatal("no fingerprint captured")
+			}
+		})
+	}
+}

@@ -199,53 +199,46 @@ func firstALPNProtocol(b []byte) string {
 	return string(name)
 }
 
-// handshakeBody extracts the body of the first handshake message in buf,
-// which may be spread across several TLS records.
-//
-// It returns the number of bytes that still need to be buffered when buf is
-// too short, so the caller can peek further instead of guessing. need is 0
-// when the message is complete or when the bytes cannot be a ClientHello at
-// all (plain HTTP on the same port, for instance), in which case err says
-// which.
-func handshakeBody(buf []byte) (body []byte, need int, err error) {
-	var assembled []byte
-	consumed := 0
+// handshakeAssembler retains framing and assembly progress across peeks at
+// the growing connection prefix. Each complete record is copied only once.
+type handshakeAssembler struct {
+	assembled []byte
+	consumed  int
+}
 
+// read extracts the first ClientHello body. If buf is short, need is the
+// absolute prefix length to peek next; need is zero on success or when the
+// bytes cannot be a ClientHello.
+func (a *handshakeAssembler) read(buf []byte) (body []byte, need int, err error) {
 	for {
-		if len(buf) < consumed+recordHeaderLen {
-			return nil, consumed + recordHeaderLen, errMalformed
+		if len(buf) < a.consumed+recordHeaderLen {
+			return nil, a.consumed + recordHeaderLen, errMalformed
 		}
 
-		header := buf[consumed : consumed+recordHeaderLen]
+		header := buf[a.consumed : a.consumed+recordHeaderLen]
 		if header[0] != recordTypeHandshake {
-			// Not a TLS handshake at all — nothing to wait for.
 			return nil, 0, errMalformed
 		}
 
 		recordLen := int(header[3])<<8 | int(header[4])
-		recordEnd := consumed + recordHeaderLen + recordLen
+		recordEnd := a.consumed + recordHeaderLen + recordLen
 		if len(buf) < recordEnd {
 			return nil, recordEnd, errMalformed
 		}
 
-		assembled = append(assembled, buf[consumed+recordHeaderLen:recordEnd]...)
-		consumed = recordEnd
+		a.assembled = append(a.assembled, buf[a.consumed+recordHeaderLen:recordEnd]...)
+		a.consumed = recordEnd
 
-		if len(assembled) < handshakeHeaderLen {
+		if len(a.assembled) < handshakeHeaderLen {
 			continue // header split across records; keep reading
 		}
-		if assembled[0] != handshakeTypeClientHello {
+		if a.assembled[0] != handshakeTypeClientHello {
 			return nil, 0, errMalformed
 		}
 
-		messageLen := int(assembled[1])<<16 | int(assembled[2])<<8 | int(assembled[3])
-		if len(assembled) >= handshakeHeaderLen+messageLen {
-			return assembled[handshakeHeaderLen : handshakeHeaderLen+messageLen], 0, nil
-		}
-		// The message continues in the next record. Ask for one more record
-		// header so the caller makes progress rather than spinning.
-		if len(buf) < consumed+recordHeaderLen {
-			return nil, consumed + recordHeaderLen, errMalformed
+		messageLen := int(a.assembled[1])<<16 | int(a.assembled[2])<<8 | int(a.assembled[3])
+		if len(a.assembled) >= handshakeHeaderLen+messageLen {
+			return a.assembled[handshakeHeaderLen : handshakeHeaderLen+messageLen], 0, nil
 		}
 	}
 }

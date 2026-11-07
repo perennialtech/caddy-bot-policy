@@ -1,10 +1,11 @@
 {
 	servers {
-		# Fingerprint-bound clearance requires HTTP/1.1 or HTTP/2.
-		protocols h1 h2
 		listener_wrappers {
 			ja4
 			tls
+		}
+		packet_conn_wrappers {
+			ja4
 		}
 	}
 }

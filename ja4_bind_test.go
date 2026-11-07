@@ -16,28 +16,29 @@ func TestJA4PublishesDistinctExactAndBoundVariables(t *testing.T) {
 	for _, tc := range []struct {
 		name, addr string
 		proto      int
-		set        func(string, string, string)
-		clear      func(string)
 	}{
-		{"TCP", "192.0.2.21:3131", 2, conns.setPair, conns.delete},
-		{"QUIC", "192.0.2.21:3132", 3, quicConns.setPair, quicConns.delete},
+		{"TCP", "192.0.2.21:3131", 2},
+		{"QUIC", "192.0.2.21:3132", 3},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := &Handler{}
 			if err := h.Provision(caddy.Context{}); err != nil {
 				t.Fatal(err)
 			}
-			key := tc.addr
 			r := httptest.NewRequest(http.MethodGet, "/", nil)
 			r.ProtoMajor, r.RemoteAddr = tc.proto, tc.addr
 			ctx := context.WithValue(r.Context(), caddyhttp.VarsCtxKey, map[string]any{})
-			if tc.proto != 3 {
+			if tc.proto == 3 {
+				slot := new(quicFingerprint)
+				slot.Store(&fingerprints{ja4: "exact-ja4", bind: "normalized-ja4"})
+				ctx = context.WithValue(ctx, quicFingerprintKey{}, slot)
+			} else {
 				local := &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 443}
-				key = tcpConnectionKey(tc.addr, local.String())
+				key := tcpConnectionKey(tc.addr, local.String())
 				ctx = context.WithValue(ctx, http.LocalAddrContextKey, local)
+				conns.setPair(key, "exact-ja4", "normalized-ja4")
+				defer conns.delete(key)
 			}
-			tc.set(key, "exact-ja4", "normalized-ja4")
-			defer tc.clear(key)
 			r = r.WithContext(ctx)
 			w := httptest.NewRecorder()
 			err := h.ServeHTTP(w, r, caddyhttp.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) error {

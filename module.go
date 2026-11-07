@@ -6,8 +6,8 @@
 //
 //	caddy.listeners.ja4       listener wrapper that reads the ClientHello and
 //	                          computes the JA4 fingerprint
-//	caddy.packetconns.ja4     packet conn wrapper that does the same for QUIC
-//	                          (HTTP/3) from Initial packets
+//	caddy.packetconns.ja4     packet conn wrapper that does the same for each
+//	                          QUIC (HTTP/3) connection's handshake
 //	http.handlers.ja4         publishes that fingerprint as a request variable
 //	http.handlers.bot_policy  blocks requests whose fingerprint is blocklisted
 //	http.handlers.turnstile   requires a Cloudflare Turnstile clearance

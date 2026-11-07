@@ -1,6 +1,10 @@
 package botpolicy
 
-import "errors"
+import (
+	"crypto/tls"
+	"errors"
+	"slices"
+)
 
 // TLS record and handshake framing constants (RFC 8446 §5.1, §4).
 const (
@@ -298,4 +302,24 @@ func (c *cursor) take(n int) ([]byte, bool) {
 func (c *cursor) skip(n int) (struct{}, bool) {
 	_, ok := c.take(n)
 	return struct{}{}, ok
+}
+
+// clientHelloFromInfo builds the JA4 inputs from a ClientHello parsed by
+// crypto/tls. Its lists are in wire order with GREASE values kept, like
+// parseClientHello's. SupportedVersions is synthesized from the legacy
+// version when the extension is absent, so version() agrees as well.
+func clientHelloFromInfo(h *tls.ClientHelloInfo) *clientHello {
+	ch := &clientHello{
+		cipherSuites:      h.CipherSuites,
+		extensions:        h.Extensions,
+		hasServerName:     slices.Contains(h.Extensions, extServerName),
+		supportedVersions: h.SupportedVersions,
+	}
+	if len(h.SupportedProtos) > 0 {
+		ch.firstALPN = h.SupportedProtos[0]
+	}
+	for _, s := range h.SignatureSchemes {
+		ch.signatureAlgorithms = append(ch.signatureAlgorithms, uint16(s))
+	}
+	return ch
 }

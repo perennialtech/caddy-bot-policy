@@ -137,23 +137,29 @@ func TestTCPFingerprintLookupIncludesLocalEndpoint(t *testing.T) {
 	}
 }
 
-// Merely overwriting the UDP-address table must never create authority
-// to use an HTTP/3 bound clearance.
-func TestForgedQUICInitialCannotAuthorizeBoundClearance(t *testing.T) {
+// An HTTP/3 request whose connection has no recorded ClientHello, as when
+// the packet conn wrapper is not configured, has no fingerprint to bind.
+func TestHTTP3WithoutConnectionFingerprintCannotAuthorize(t *testing.T) {
 	ts := newTestTurnstile(t, true)
-	r := newTurnstileRequest(http.MethodGet, "/private", testFPQUIC, nil)
-	r.ProtoMajor = 3
-	addr := "198.51.100.25:4433"
-	r.RemoteAddr = addr
-	quicConns.setPair(addr, "forged-exact", testFPQUIC)
-	defer quicConns.delete(addr)
-	c := &http.Cookie{Name: ts.cookieName(testFPQUIC, true),
-		Value: ts.mintClearance(time.Now(), newTurnstileRequest(http.MethodGet, "/private", testFPQUIC, nil))}
-	r.AddCookie(c)
-	if ts.cleared(r) {
-		t.Fatal("HTTP/3 accepted a cookie using unauthenticated QUIC Initial data")
+	h := &Handler{}
+	if err := h.Provision(caddy.Context{}); err != nil {
+		t.Fatal(err)
 	}
-	if fp, bound := ts.fingerprint(r); !bound || fp != "" {
-		t.Fatalf("HTTP/3 attributed unauthenticated data to live connection: %q", fp)
+	for name, ctx := range map[string]context.Context{
+		"no wrapper":        context.Background(),
+		"no hello observed": context.WithValue(context.Background(), quicFingerprintKey{}, new(quicFingerprint)),
+	} {
+		r := httptest.NewRequest(http.MethodGet, "https://example.com/", nil)
+		r.ProtoMajor = 3
+		r = r.WithContext(context.WithValue(ctx, caddyhttp.VarsCtxKey, map[string]any{"ja4_bind": testFPQUIC}))
+		err := h.ServeHTTP(httptest.NewRecorder(), r, caddyhttp.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) error {
+			if fp, bound := ts.fingerprint(r); !bound || fp != "" {
+				t.Errorf("%s: HTTP/3 request got fingerprint %q, bound=%t", name, fp, bound)
+			}
+			return nil
+		}))
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 }

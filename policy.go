@@ -13,9 +13,9 @@ import (
 
 // BotPolicy is an HTTP middleware that blocks requests whose TLS client
 // fingerprint (JA4) matches an entry on a configured blocklist. The
-// fingerprint is not computed here; it is read from the request variable
-// published by the ja4 handler, which in turn needs the ja4 listener wrapper
-// to have captured the ClientHello.
+// fingerprint is not computed here; it comes from the ja4 handler, which in
+// turn needs the ja4 listener or packet conn wrapper to have captured the
+// ClientHello.
 //
 // Example Caddyfile usage:
 //
@@ -27,16 +27,18 @@ import (
 //		action                 block-403
 //	}
 type BotPolicy struct {
-	// VarName is the http.vars.* key that holds the fingerprint published
-	// by the ja4 handler. Defaults to "ja4".
+	// VarName names the fingerprint to match: the ja4 handler's var_name or
+	// bind_var_name. It is read from the ja4 handler directly, not from the
+	// request variable, which other directives can overwrite. Defaults to
+	// "ja4".
 	VarName string `json:"var_name,omitempty"`
 
 	// Blocked is the list of JA4 fingerprints to block. At least one is
 	// required.
 	Blocked []string `json:"blocked,omitempty"`
 
-	// OnMissingFingerprint is "open" (let the request through when the
-	// configured var_name variable is empty/unset) or "closed" (block
+	// OnMissingFingerprint is "open" (let the request through when the ja4
+	// handler published no fingerprint under var_name) or "closed" (block
 	// it). Defaults to "open".
 	OnMissingFingerprint string `json:"on_missing_fingerprint,omitempty"`
 
@@ -106,7 +108,7 @@ func (bp *BotPolicy) Validate() error {
 
 // ServeHTTP implements caddyhttp.MiddlewareHandler.
 func (bp *BotPolicy) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
-	fingerprint, _ := caddyhttp.GetVar(r.Context(), bp.VarName).(string)
+	fingerprint := trustedFingerprint(r, bp.VarName)
 
 	var shouldBlock bool
 	switch {

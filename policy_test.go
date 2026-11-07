@@ -42,6 +42,9 @@ func doRequest(t *testing.T, bp *BotPolicy, fingerprint string) *httptest.Respon
 		varMap[bp.VarName] = fingerprint
 	}
 	ctx := context.WithValue(req.Context(), caddyhttp.VarsCtxKey, varMap)
+	ctx = context.WithValue(ctx, observedFingerprintKey{}, observedFingerprint{
+		exactName: bp.VarName, bindName: "ja4_bind", exact: fingerprint,
+	})
 	req = req.WithContext(ctx)
 
 	rec := httptest.NewRecorder()
@@ -110,5 +113,20 @@ func TestProvisionErrorsOnInvalidAction(t *testing.T) {
 	}
 	if err := bp.Provision(caddy.Context{}); err == nil {
 		t.Error("expected Provision to error on an unsupported action")
+	}
+}
+
+// Another directive can set the request variable; only the ja4 handler's own
+// value counts.
+func TestServeHTTPIgnoresRequestVariable(t *testing.T) {
+	bp := newTestPolicy(t, "open", "blocked-fp")
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req = req.WithContext(context.WithValue(req.Context(), caddyhttp.VarsCtxKey, map[string]any{"ja4": "blocked-fp"}))
+	rec := httptest.NewRecorder()
+	if err := bp.ServeHTTP(rec, req, passThrough); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("blocked on a request variable the ja4 handler did not publish: %d", rec.Code)
 	}
 }

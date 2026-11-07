@@ -2,7 +2,11 @@ package botpolicy
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/binary"
+	"errors"
+	"io"
+	"net"
 	"testing"
 )
 
@@ -242,4 +246,71 @@ func equalUint16(a, b []uint16) bool {
 		}
 	}
 	return true
+}
+
+// pskExtension is a pre_shared_key extension with one identity and binder,
+// as a resuming client sends it.
+func pskExtension() []byte {
+	var buf bytes.Buffer
+	binary.Write(&buf, binary.BigEndian, uint16(2+1+4)) // identities
+	binary.Write(&buf, binary.BigEndian, uint16(1))
+	buf.WriteByte('x')
+	binary.Write(&buf, binary.BigEndian, uint32(0)) // obfuscated ticket age
+	binary.Write(&buf, binary.BigEndian, uint16(1+32))
+	buf.WriteByte(32)
+	buf.Write(make([]byte, 32))
+	return buf.Bytes()
+}
+
+// QUIC fingerprints come from crypto/tls's parsed ClientHello rather than
+// from the wire, so both paths must agree, GREASE and resumption included.
+func TestClientHelloFromInfoMatchesWireParser(t *testing.T) {
+	for name, b := range map[string]*helloBuilder{
+		"full": fullHello(),
+		"greased resumption": fullHello().
+			extension(0x0a0a, nil).
+			extension(extPadding, make([]byte, 16)).
+			extension(extEarlyData, nil).
+			extension(extPreSharedKey, pskExtension()),
+		"no sni or alpn": (&helloBuilder{legacyVersion: 0x0303, cipherSuites: []uint16{0x1301}}).
+			extension(extSupportedVersions, supportedVersionsExtension(0x0304)).
+			extension(extSignatureAlgorithms, signatureAlgorithmsExtension(0x2a2a, 0x0403)),
+	} {
+		t.Run(name, func(t *testing.T) {
+			wire, err := parseClientHello(b.body())
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var info *clientHello
+			client, server := net.Pipe()
+			defer client.Close()
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				tls.Server(server, &tls.Config{GetConfigForClient: func(h *tls.ClientHelloInfo) (*tls.Config, error) {
+					info = clientHelloFromInfo(h)
+					return nil, errors.New("stop after the ClientHello")
+				}}).Handshake()
+				server.Close()
+			}()
+			go func() {
+				client.Write(b.records(0))
+				io.Copy(io.Discard, client) // the server's alert
+			}()
+			<-done
+			if info == nil {
+				t.Fatal("crypto/tls rejected the ClientHello")
+			}
+
+			for _, transport := range []byte{transportTCP, transportQUIC} {
+				if got, want := info.ja4(transport), wire.ja4(transport); got != want {
+					t.Errorf("%c: ja4 from ClientHelloInfo %q, from wire %q", transport, got, want)
+				}
+				if got, want := info.ja4Bind(transport), wire.ja4Bind(transport); got != want {
+					t.Errorf("%c: ja4Bind from ClientHelloInfo %q, from wire %q", transport, got, want)
+				}
+			}
+		})
+	}
 }

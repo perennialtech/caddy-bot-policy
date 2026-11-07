@@ -78,16 +78,12 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 // could not observe a ClientHello. This prevents earlier request-derived vars
 // from being mistaken for a trusted wire fingerprint.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
-	store := conns.getPair
-	key := ""
+	var fp fingerprints
 	if r.ProtoMajor == 3 {
-		// The QUIC sniffer records Initial packets by UDP source address.
-		store = quicConns.getPair
-		key = normalizeAddr(r.RemoteAddr)
+		fp = quicConnFingerprint(r.Context())
 	} else if local, ok := r.Context().Value(http.LocalAddrContextKey).(net.Addr); ok {
-		key = tcpConnectionKey(r.RemoteAddr, local.String())
+		fp = conns.getPair(tcpConnectionKey(r.RemoteAddr, local.String()))
 	}
-	fp := store(key)
 	// Clear preexisting vars even when no ClientHello was captured.
 	caddyhttp.SetVar(r.Context(), h.VarName, fp.ja4)
 	caddyhttp.SetVar(r.Context(), h.BindVarName, fp.bind)
@@ -95,6 +91,24 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		exactName: h.VarName, bindName: h.BindVarName, exact: fp.ja4, bind: fp.bind,
 	}))
 	return next.ServeHTTP(w, r)
+}
+
+// trustedFingerprint returns the wire fingerprint the ja4 handler published
+// as varName for r, ignoring the request variable itself. It is empty when
+// no ja4 handler ran or varName is not one it publishes.
+func trustedFingerprint(r *http.Request, varName string) string {
+	observed, ok := r.Context().Value(observedFingerprintKey{}).(observedFingerprint)
+	if !ok {
+		return ""
+	}
+	switch varName {
+	case observed.exactName:
+		return observed.exact
+	case observed.bindName:
+		return observed.bind
+	default:
+		return ""
+	}
 }
 
 // UnmarshalCaddyfile implements caddyfile.Unmarshaler.

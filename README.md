@@ -7,11 +7,19 @@ challenge clearances.
 
 ## Install
 
-Build Caddy with the plugin using [xcaddy](https://github.com/caddyserver/xcaddy):
+Build Caddy with the plugin using [xcaddy](https://github.com/caddyserver/xcaddy).
+HTTP/3 fingerprinting needs a QUIC handshake hook that upstream Caddy
+lacks, so build from the [perennialtech/caddy](https://github.com/perennialtech/caddy)
+fork that adds it:
 
 ```sh
-xcaddy build --with github.com/perennialtech/caddy-bot-policy
+xcaddy build v2.11.4 \
+  --with github.com/perennialtech/caddy-bot-policy \
+  --replace github.com/caddyserver/caddy/v2=github.com/perennialtech/caddy/v2@v2.11.4-ja4.1
 ```
+
+Without the replacement the plugin still builds, but HTTP/3 requests have no
+fingerprint.
 
 Use [examples/observe.Caddyfile](examples/observe.Caddyfile) to start
 recording JA4 in access logs. Replace `example.com` and the upstream
@@ -22,8 +30,8 @@ address, then run:
 ```
 
 The `ja4` listener wrapper must run before `tls`. HTTP/3 uses the separate
-`packet_conn_wrappers` block (requires Caddy 2.11 or later). Without it,
-HTTP/3 requests have no captured fingerprint.
+`packet_conn_wrappers` block. Without it, HTTP/3 requests have no captured
+fingerprint.
 
 ## Configure policies and challenges
 
@@ -55,7 +63,8 @@ options and their validation.
 | `ja4` | `var_name`, `bind_var_name` |
 | `bot_policy` | `block` (repeatable, required), `var_name`, `on_missing_fingerprint` (`open` or `closed`), `action` (`block-403`) |
 | `turnstile` | `site_key`, `secret_key` (required), `clearance_ttl`, `clearance_key`, `cookie_name`, `bind_fingerprint`, `max_pending_verifications`, `allow_insecure_cookie` |
-| TCP `listener_wrappers ja4`, UDP `packet_conn_wrappers ja4` | `max_capture_bytes` |
+| TCP `listener_wrappers ja4` | `max_capture_bytes` |
+| UDP `packet_conn_wrappers ja4` | none |
 
 Use `bind_fingerprint` with the variable name published by the `ja4`
 handler's `bind_var_name`; changing one requires changing the other.
@@ -81,13 +90,13 @@ a request rate limit.
 
 ## Operational requirements
 
-**Fingerprint-bound Turnstile must use HTTP/1.1 or HTTP/2 only.**
-Set `servers { protocols h1 h2 }` as in the bound example. The plugin
-refuses bound clearances on HTTP/3 even if QUIC JA4 observation is enabled:
-a decrypted QUIC Initial cannot be reliably associated with the authenticated
-HTTP/3 request. QUIC JA4 is useful for telemetry, **not authorization**;
-do not rely on it as a security boundary for a blocklist either. A TCP
-fingerprint identifies a TLS client profile, not a unique person or device.
+**HTTP/3 needs the forked Caddy build and `packet_conn_wrappers ja4`.**
+The fingerprint comes from the ClientHello of the QUIC connection that
+carries the request, as TCP fingerprints come from the TCP connection. If
+either is missing, HTTP/3 requests have no fingerprint: bound clearances
+are refused and `bot_policy` applies `on_missing_fingerprint`. Otherwise
+disable HTTP/3 with `servers { protocols h1 h2 }`. A fingerprint identifies
+a TLS client profile, not a unique person or device.
 
 **Bound clearance limits cookie reuse, not token redemption.**
 A valid Turnstile token solved in one browser can be submitted by a different

@@ -35,8 +35,10 @@ import (
 // Initial packets from the same UDP address therefore cannot change it, and
 // connection migration does not lose it.
 //
-// This needs the caddy.QUICHandshakeObserver hook from the
-// perennialtech/caddy fork; see the README.
+// It implements caddy.QUICHandshakeObserver from the perennialtech/caddy
+// fork (see the README). Stock Caddy never calls those methods, so HTTP/3
+// requests have no fingerprint there. There is deliberately no interface
+// guard for it, so the plugin still builds against stock Caddy.
 type PacketConnWrapper struct{}
 
 // CaddyModule returns the Caddy module information.
@@ -179,8 +181,7 @@ func (c *oobPacketConn) ReadBatch(ms []ipv4.Message, flags int) (int, error) {
 
 // Interface guards.
 var (
-	_ caddy.PacketConnWrapper     = (*PacketConnWrapper)(nil)
-	_ caddy.QUICHandshakeObserver = (*PacketConnWrapper)(nil)
-	_ caddyfile.Unmarshaler       = (*PacketConnWrapper)(nil)
-	_ oobCapablePacketConn        = (*oobPacketConn)(nil)
+	_ caddy.PacketConnWrapper = (*PacketConnWrapper)(nil)
+	_ caddyfile.Unmarshaler   = (*PacketConnWrapper)(nil)
+	_ oobCapablePacketConn    = (*oobPacketConn)(nil)
 )

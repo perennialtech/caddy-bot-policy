@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
@@ -32,11 +33,11 @@ type BotPolicy struct {
 	// Both lists are validated when the configuration is provisioned.
 	Blacklist []string `json:"blacklist,omitempty"`
 
-	// ASNDB is the local path to a GeoLite2-compatible or GeoIP2-ASN MMDB.
-	// It is required when either policy list has an asn: entry. An unreadable
-	// or incompatible database rejects the configuration at startup. Changes
-	// to the file are picked up automatically.
-	ASNDB string `json:"asn_db,omitempty"`
+	// ASNDB names a GeoLite2-compatible or GeoIP2-ASN MMDB file.
+	// Local files are hot-reloaded, or MaxMind can download GeoLite2-ASN.
+	// One of these is required when ASN rules are configured.
+	ASNDB   string      `json:"asn_db,omitempty"`
+	MaxMind *MaxMindASN `json:"maxmind,omitempty"`
 
 	// Action is the response taken when a request is blocked. Only
 	// "block-403" is currently supported: responds 403 and attaches a
@@ -46,6 +47,8 @@ type BotPolicy struct {
 	whitelist policyList
 	blacklist policyList
 	asnDB     *asnDatabase
+	managed   *managedASNDB
+	cleaned   *atomic.Bool
 	logger    *zap.Logger
 }
 
@@ -137,31 +140,59 @@ func (bp *BotPolicy) Provision(ctx caddy.Context) error {
 		return err
 	}
 	if len(bp.whitelist.asns) > 0 || len(bp.blacklist.asns) > 0 {
-		if bp.ASNDB == "" {
-			return fmt.Errorf("bot_policy: asn_db is required for ASN rules")
+		if bp.MaxMind != nil && bp.ASNDB != "" {
+			return fmt.Errorf("bot_policy: choose either a local asn_db or maxmind")
 		}
-		path, err := filepath.Abs(bp.ASNDB)
-		if err != nil {
-			return fmt.Errorf("bot_policy: resolve asn_db %q: %w", bp.ASNDB, err)
+		if bp.MaxMind != nil {
+			repl := caddy.NewReplacer()
+			cfg := MaxMindASN{
+				AccountID:  repl.ReplaceKnown(bp.MaxMind.AccountID, ""),
+				LicenseKey: repl.ReplaceKnown(bp.MaxMind.LicenseKey, ""),
+			}
+			if cfg.AccountID == "" || cfg.LicenseKey == "" {
+				return fmt.Errorf("bot_policy: maxmind account_id and license_key are required")
+			}
+			var err error
+			bp.managed, err = acquireMaxMindDB(maxMindCachePath(), bp, cfg, bp.logger)
+			if err != nil {
+				return fmt.Errorf("bot_policy: %w", err)
+			}
+		} else {
+			if bp.ASNDB == "" {
+				return fmt.Errorf("bot_policy: asn_db is required for ASN rules")
+			}
+			path, err := filepath.Abs(bp.ASNDB)
+			if err != nil {
+				return fmt.Errorf("bot_policy: resolve asn_db %q: %w", bp.ASNDB, err)
+			}
+			value, _, err := asnDatabases.LoadOrNew(path, func() (caddy.Destructor, error) {
+				return newASNDatabase(path, bp.logger)
+			})
+			if err != nil {
+				return err
+			}
+			bp.asnDB = value.(*asnDatabase)
 		}
-		value, _, err := asnDatabases.LoadOrNew(path, func() (caddy.Destructor, error) {
-			return newASNDatabase(path, bp.logger)
-		})
-		if err != nil {
-			return err
-		}
-		bp.asnDB = value.(*asnDatabase)
+		bp.cleaned = new(atomic.Bool)
 	}
 	return nil
 }
 
-// Cleanup releases this configuration's reference to the shared watcher.
+// Cleanup releases this configuration's shared ASN database reference.
 func (bp *BotPolicy) Cleanup() error {
-	if bp.asnDB == nil {
+	if bp.cleaned == nil || !bp.cleaned.CompareAndSwap(false, true) {
 		return nil
 	}
-	_, err := asnDatabases.Delete(bp.asnDB.path)
-	return err
+	if bp.managed != nil {
+		bp.managed.removeUser(bp)
+		_, err := maxMindDatabases.Delete(bp.managed.path)
+		return err
+	}
+	if bp.asnDB != nil {
+		_, err := asnDatabases.Delete(bp.asnDB.path)
+		return err
+	}
+	return nil
 }
 
 // Validate ensures bp has at least one policy entry.
@@ -174,13 +205,16 @@ func (bp *BotPolicy) Validate() error {
 
 // ServeHTTP implements caddyhttp.MiddlewareHandler.
 func (bp *BotPolicy) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
+	var reader *maxminddb.Reader
+	if bp.managed != nil {
+		reader = bp.managed.reader.Load()
+	} else if bp.asnDB != nil {
+		reader = bp.asnDB.reader.Load()
+	}
 	// In 0-RTT, the source IP is not yet verified. A known blacklist
 	// match can still block, and a non-IP whitelist can still bypass
 	// when there are no unresolved ASN blacklist rules.
-	var reader *maxminddb.Reader
-	if bp.asnDB != nil {
-		reader = bp.asnDB.reader.Load()
-	}
+
 	early := reader != nil && r.TLS != nil && !r.TLS.HandshakeComplete
 	var asn uint32
 	if reader != nil && !early {

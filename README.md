@@ -44,17 +44,34 @@ requested URL; protect any public rewrite aliases as well. For
 method-restricted matchers, include both GET and POST. Use matchers to
 exclude webhook, API and preflight paths rather than challenging them.
 
-For `asn:13335` entries in either list, obtain a local MaxMind
-[GeoLite2 ASN database](https://dev.maxmind.com/geoip/geolite2-free-geolocation-data/)
-or [DB-IP ASN Lite database](https://db-ip.com/db/download/ip-to-asn-lite),
-and set `asn_db /path/to/asn.mmdb` inside `bot_policy`. GeoIP2 ASN
-databases also work. Replace the file atomically (write a temporary
-file, then rename it into place); Caddy picks up changes within a minute
-without a configuration reload. If a refresh fails, the last valid
-database remains in use. Requests never perform external ASN lookups.
-Lookups use Caddy's resolved client IP (respecting `trusted_proxies`),
-not forwarding headers. Unknown or unmapped IPs have no ASN match;
-ASN rules require a readable database at startup.
+For `asn:13335` entries in either list, you can use an automatically
+managed [MaxMind GeoLite2 ASN database](https://dev.maxmind.com/geoip/geolite2-free-geolocation-data/).
+Supply your MaxMind account ID and license key:
+
+```caddyfile
+bot_policy {
+    asn_db maxmind {
+        account_id  {env.MAXMIND_ACCOUNT_ID}
+        license_key {env.MAXMIND_LICENSE_KEY}
+    }
+    blacklist asn:13335
+}
+```
+
+Caddy downloads the database on first start, caches it in its data
+directory, checks for updated builds daily, and swaps in new data without
+reloading. If a cached copy exists, startup does not wait for MaxMind;
+failed updates keep the cached database in service.
+
+Alternatively, obtain a local GeoLite2, GeoIP2 ASN, or
+[DB-IP ASN Lite database](https://db-ip.com/db/download/ip-to-asn-lite),
+and set `asn_db /path/to/asn.mmdb` in `bot_policy`. Replace the file
+atomically (write a temporary file, then rename it into place); Caddy
+picks up changes within a minute without a config reload. Failed
+updates keep the last valid database. Requests never perform external
+ASN lookups. Lookups use Caddy's resolved client IP (respecting
+`trusted_proxies`), not forwarding headers. Unknown or unmapped IPs
+have no ASN match; ASN rules require a readable database at startup.
 
 ## Operational requirements
 

@@ -1,8 +1,8 @@
 """End-to-end browser test for the turnstile handler.
 
 Drives real Chromium through the challenge against Cloudflare's live
-siteverify, using the public testing keys. Not run in CI: it needs Chromium
-and network access to challenges.cloudflare.com.
+siteverify, using the public testing keys. Requires Chromium and network
+access to challenges.cloudflare.com.
 
     pip install playwright && playwright install chromium
     xcaddy build v2.11.9 --with github.com/perennialtech/caddy-bot-policy=../..

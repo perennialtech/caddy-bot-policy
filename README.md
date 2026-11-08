@@ -139,6 +139,5 @@ including when TLS terminates at an upstream proxy.
 Run the gates defined in [.github/workflows/ci.yml](.github/workflows/ci.yml).
 
 Go integration tests exercise Caddy routing with manually replayed cookies,
-not browser cookie handling. `test/browser/` contains an optional browser
-integration test against Cloudflare's public Turnstile testing keys. Its
-`run.py` describes additional dependencies; it is not part of CI.
+not browser cookie handling. CI also runs `test/browser/run.py` in Chromium
+against Cloudflare's public Turnstile testing keys.

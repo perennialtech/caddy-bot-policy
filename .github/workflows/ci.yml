@@ -24,3 +24,30 @@ jobs:
         run: go vet ./...
       - name: go test
         run: go test -race -count=1 ./...
+
+  browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Install Chromium
+        run: |
+          python -m pip install playwright
+          python -m playwright install --with-deps chromium
+      - name: Build Caddy
+        run: |
+          go run github.com/caddyserver/xcaddy/cmd/xcaddy@v0.4.7 build v2.11.9 \
+            --with github.com/perennialtech/caddy-bot-policy=.
+      - name: Browser test
+        run: |
+          ./caddy run --config test/browser/Caddyfile &
+          caddy_pid=$!
+          trap 'kill "$caddy_pid" 2>/dev/null || true' EXIT
+          curl --insecure --silent --show-error --retry 30 --retry-connrefused \
+            --retry-delay 1 --output /dev/null https://localhost:18443
+          python test/browser/run.py

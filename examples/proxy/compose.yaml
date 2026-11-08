@@ -11,7 +11,7 @@ services:
       - caddy_config:/config
 
   filter:
-    build: .
+    image: ghcr.io/perennialtech/caddy-bot-policy:latest
     environment:
       BIND: ":3000"
       TARGET: http://whoami:80

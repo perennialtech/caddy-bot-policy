@@ -46,15 +46,15 @@ client → front proxy (TLS, routing) → Caddy with turnstile → backend
 ```
 
 [examples/proxy](examples/proxy) runs this with Docker Compose:
-`docker compose up --build` in that directory, then open
-`https://localhost`. It builds the plugin into Caddy and uses Cloudflare's
-testing keys unless you set `TURNSTILE_SITE_KEY` and
+`docker compose up` in that directory, then open `https://localhost`.
+The filter pulls `ghcr.io/perennialtech/caddy-bot-policy:latest` (also
+published as `sha-<commit SHA>`). The example uses Cloudflare's testing
+keys unless you set `TURNSTILE_SITE_KEY` and
 `TURNSTILE_SECRET_KEY`. The filter takes its listen address, upstream and
 trusted proxies from `BIND`, `TARGET` and `TRUSTED_PROXIES`.
 
-The example resolves the plugin remotely without pinning a module version;
-it does not build the current checkout. For tests of local source changes,
-use the local module replacement shown in [test/browser/run.py](test/browser/run.py).
+To build the filter from your checkout instead of pulling the image, run
+`docker build -f examples/proxy/Dockerfile .` at the repository root.
 
 The front proxy and the filter must agree on a few things:
 

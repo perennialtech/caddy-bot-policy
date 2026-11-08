@@ -58,10 +58,11 @@ The front proxy and the filter must agree on a few things:
   Otherwise `client_ip` matchers and Turnstile's `remoteip` see the proxy's
   address instead of the visitor's.
 - Forward the visitor's address in `X-Forwarded-For`, or configure the
-  filter's `client_ip_headers` for a different header, such as nginx's
-  `X-Real-IP`. If the front proxy appends to incoming `X-Forwarded-For`,
-  enable `trusted_proxies_strict` on the filter to prevent client-supplied
-  addresses from bypassing IP rules.
+  filter's `client_ip_headers` for another header that the front proxy
+  overwrites (nginx: `proxy_set_header X-Real-IP $remote_addr;` with
+  `client_ip_headers X-Real-IP` on the filter). If the front proxy appends
+  to incoming `X-Forwarded-For`, enable `trusted_proxies_strict` on the
+  filter to prevent client-supplied addresses from bypassing IP rules.
 - Forward the original `Host` header. Turnstile verifies the hostname on
   which the challenge was solved. Caddy and Traefik preserve it by default;
   nginx needs `proxy_set_header Host $host`.

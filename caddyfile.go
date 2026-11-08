@@ -13,6 +13,10 @@ import (
 //
 //	bot_policy {
 //		asn_db                 /var/lib/geoip/GeoLite2-ASN.mmdb
+//		// Or: asn_db maxmind {
+//		//     account_id  {env.MAXMIND_ACCOUNT_ID}
+//		//     license_key {env.MAXMIND_LICENSE_KEY}
+//		// }
 //		whitelist              192.0.2.10 2001:db8:1::/48 "ua:(?i)googlebot"
 //		whitelist              asn:13335
 //		blacklist              198.51.100.0/24
@@ -38,9 +42,40 @@ func (bp *BotPolicy) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				if !d.NextArg() {
 					return d.ArgErr()
 				}
-				bp.ASNDB = d.Val()
+				value := d.Val()
 				if d.NextArg() {
 					return d.ArgErr()
+				}
+				if bp.ASNDB != "" || bp.MaxMind != nil {
+					return d.Err("asn_db may only be configured once")
+				}
+				if value == "maxmind" {
+					bp.MaxMind = &MaxMindASN{}
+					for d.NextBlock(1) {
+						key := d.Val()
+						switch key {
+						case "account_id", "license_key":
+						default:
+							return d.Errf("unknown maxmind option %q", key)
+						}
+						if !d.NextArg() {
+							return d.ArgErr()
+						}
+						arg := d.Val()
+						if d.NextArg() {
+							return d.ArgErr()
+						}
+						if key == "account_id" {
+							bp.MaxMind.AccountID = arg
+						} else {
+							bp.MaxMind.LicenseKey = arg
+						}
+					}
+					if bp.MaxMind.AccountID == "" || bp.MaxMind.LicenseKey == "" {
+						return d.Err("maxmind requires account_id and license_key")
+					}
+				} else {
+					bp.ASNDB = value
 				}
 
 			case "whitelist", "blacklist":

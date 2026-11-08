@@ -44,16 +44,32 @@ requested URL; protect any public rewrite aliases as well. For
 method-restricted matchers, include both GET and POST. Use matchers to
 exclude webhook, API and preflight paths rather than challenging them.
 
-For `asn:13335` entries in either list, obtain a local MaxMind
+For `asn:13335` entries, configure an automatic MaxMind
 [GeoLite2 ASN database](https://dev.maxmind.com/geoip/geolite2-free-geolocation-data/)
-and set `asn_db /path/to/GeoLite2-ASN.mmdb` inside `bot_policy`. GeoIP2
-ASN databases also work. Refresh the file and run
-`caddy reload --force --config /path/to/Caddyfile` (or restart Caddy)
-to update the mapping. An ordinary reload of unchanged config is skipped.
+download using your MaxMind account ID and license key:
+
+```caddyfile
+bot_policy {
+    asn_db maxmind {
+        account_id  {env.MAXMIND_ACCOUNT_ID}
+        license_key {env.MAXMIND_LICENSE_KEY}
+    }
+    blacklist asn:13335
+}
+```
+
+Caddy downloads the database on first start, caches it in its data
+directory, checks for updated builds daily, and swaps in new data without
+reloading. If a cached copy exists, startup does not wait for MaxMind;
+failed updates keep the cached database in service. Alternatively,
+`asn_db /path/to/GeoLite2-ASN.mmdb` continues to load a local database
+(GeoIP2 ASN is also supported) and requires a Caddy reload after external
+file updates.
+
 Requests never perform external ASN lookups. Lookups use Caddy's
 resolved client IP (respecting `trusted_proxies`), not forwarding
-headers. Unknown or unmapped IPs have no ASN match; ASN rules require a
-readable database at startup.
+headers. Unknown or unmapped IPs have no ASN match; ASN rules require
+a readable database at startup.
 
 ## Operational requirements
 

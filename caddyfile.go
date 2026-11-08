@@ -2,89 +2,12 @@ package botpolicy
 
 import (
 	"strconv"
-	"strings"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 )
-
-// UnmarshalCaddyfile implements caddyfile.Unmarshaler for the ASN matcher.
-//
-//	@blockedASN asn {
-//	    numbers 13335 64500
-//	    asn_db maxmind {
-//	        account_id {env.MAXMIND_ACCOUNT_ID}
-//	        license_key {env.MAXMIND_LICENSE_KEY}
-//	    }
-//	}
-func (m *MatchASN) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
-	for d.Next() {
-		if d.NextArg() {
-			return d.ArgErr()
-		}
-		for d.NextBlock(0) {
-			switch d.Val() {
-			case "numbers":
-				args := d.RemainingArgs()
-				if len(args) == 0 {
-					return d.ArgErr()
-				}
-				for _, number := range args {
-					if number == "" || strings.IndexFunc(number, func(r rune) bool { return r < '0' || r > '9' }) >= 0 {
-						return d.Err("ASN must be an unsigned decimal number")
-					}
-					asn, err := strconv.ParseUint(number, 10, 32)
-					if err != nil || asn == 0 {
-						return d.Err("ASN must be between 1 and 4294967295")
-					}
-					m.ASNs = append(m.ASNs, uint32(asn))
-				}
-			case "asn_db":
-				if !d.NextArg() {
-					return d.ArgErr()
-				}
-				value := d.Val()
-				if d.NextArg() {
-					return d.ArgErr()
-				}
-				if m.ASNDB != "" || m.MaxMind != nil {
-					return d.Err("asn_db may only be configured once")
-				}
-				if value == "maxmind" {
-					m.MaxMind = &MaxMindASN{}
-					for d.NextBlock(1) {
-						key := d.Val()
-						if key != "account_id" && key != "license_key" {
-							return d.Errf("unknown maxmind option %q", key)
-						}
-						if !d.NextArg() {
-							return d.ArgErr()
-						}
-						arg := d.Val()
-						if d.NextArg() {
-							return d.ArgErr()
-						}
-						if key == "account_id" {
-							m.MaxMind.AccountID = arg
-						} else {
-							m.MaxMind.LicenseKey = arg
-						}
-					}
-					if m.MaxMind.AccountID == "" || m.MaxMind.LicenseKey == "" {
-						return d.Err("maxmind requires account_id and license_key")
-					}
-				} else {
-					m.ASNDB = value
-				}
-			default:
-				return d.Errf("unknown asn option %q", d.Val())
-			}
-		}
-	}
-	return nil
-}
 
 // parseTurnstileCaddyfile sets up a turnstile handler from Caddyfile tokens.
 //

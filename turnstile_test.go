@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -24,8 +23,6 @@ const (
 	testSiteKey   = "1x00000000000000000000AA"
 	testSecretKey = "test-secret-key"
 	testHost      = "example.com"
-	testFP        = "t13d1517h2_8daaf6152771_b6f405a00624"
-	testFPQUIC    = "q13d0312h3_55b375c5d22e_cd8dafe46ac5"
 )
 
 // fakeSiteverify stands in for Cloudflare. It accepts exactly one token,
@@ -85,19 +82,16 @@ func newFake(t *testing.T, hostname, action string) *fakeSiteverify {
 	return f
 }
 
-func newTestTurnstile(t *testing.T, bind bool) *Turnstile {
+func newTestTurnstile(t *testing.T) *Turnstile {
 	t.Helper()
 	ts := &Turnstile{SiteKey: testSiteKey, SecretKey: testSecretKey}
-	if bind {
-		ts.BindFingerprintVar = "ja4"
-	}
 	if err := ts.Provision(caddy.Context{}); err != nil {
 		t.Fatalf("Provision: %v", err)
 	}
 	return ts
 }
 
-func newTurnstileRequest(method, target, fingerprint string, body url.Values) *http.Request {
+func newTurnstileRequest(method, target string, body url.Values) *http.Request {
 	var req *http.Request
 	if body != nil {
 		req = httptest.NewRequest(method, target, strings.NewReader(body.Encode()))
@@ -108,13 +102,7 @@ func newTurnstileRequest(method, target, fingerprint string, body url.Values) *h
 	req.Host = testHost
 	req.TLS = &tls.ConnectionState{}
 	vars := map[string]any{caddyhttp.ClientIPVarKey: "203.0.113.1"}
-	if fingerprint != "" {
-		vars["ja4"] = fingerprint
-	}
 	ctx := context.WithValue(req.Context(), caddyhttp.VarsCtxKey, vars)
-	ctx = context.WithValue(ctx, observedFingerprintKey{}, observedFingerprint{
-		exactName: "ja4", bindName: "ja4_bind", exact: fingerprint, bind: fingerprint,
-	})
 	return req.WithContext(ctx)
 }
 
@@ -155,9 +143,9 @@ var noncePattern = regexp.MustCompile(`'nonce-([A-Za-z0-9_-]+)'`)
 // solves, gets a cookie, comes back with it and is let through.
 func TestTurnstileFullFlow(t *testing.T) {
 	newFake(t, testHost, turnstileAction)
-	ts := newTestTurnstile(t, false)
+	ts := newTestTurnstile(t)
 
-	rec, reached := serve(t, ts, newTurnstileRequest(http.MethodGet, "/articles?page=2&sort=new", "", nil))
+	rec, reached := serve(t, ts, newTurnstileRequest(http.MethodGet, "/articles?page=2&sort=new", nil))
 	if reached || rec.Code != http.StatusForbidden {
 		t.Fatalf("no cookie: got %d (reached=%v), want a 403 challenge", rec.Code, reached)
 	}
@@ -178,14 +166,14 @@ func TestTurnstileFullFlow(t *testing.T) {
 		t.Error("challenge page must not be cacheable")
 	}
 
-	rec, reached = serve(t, ts, newTurnstileRequest(http.MethodPost, "/articles?page=2&sort=new", "", solve("good")))
+	rec, reached = serve(t, ts, newTurnstileRequest(http.MethodPost, "/articles?page=2&sort=new", solve("good")))
 	if reached || rec.Code != http.StatusSeeOther {
 		t.Fatalf("verify: got %d (reached=%v), want 303", rec.Code, reached)
 	}
 	if loc := rec.Header().Get("Location"); loc != "/articles?page=2&sort=new" {
 		t.Errorf("verify redirected to %q, want the original page", loc)
 	}
-	c := cookieFrom(rec, ts.cookieName("", false))
+	c := cookieFrom(rec, ts.cookieName())
 	if c == nil {
 		t.Fatal("verify did not set a clearance cookie")
 	}
@@ -196,14 +184,14 @@ func TestTurnstileFullFlow(t *testing.T) {
 		t.Errorf("cookie Max-Age = %d, want 30 days", c.MaxAge)
 	}
 
-	req := newTurnstileRequest(http.MethodGet, "/articles?page=2&sort=new", "", nil)
+	req := newTurnstileRequest(http.MethodGet, "/articles?page=2&sort=new", nil)
 	req.AddCookie(c)
 	if rec, reached = serve(t, ts, req); !reached || rec.Code != http.StatusOK {
 		t.Errorf("with clearance: got %d (reached=%v), want pass-through", rec.Code, reached)
 	}
 
 	// A cleared POST must reach the app untouched, marker or not.
-	req = newTurnstileRequest(http.MethodPost, "/form", "", solve("whatever"))
+	req = newTurnstileRequest(http.MethodPost, "/form", solve("whatever"))
 	req.AddCookie(c)
 	if _, reached = serve(t, ts, req); !reached {
 		t.Error("a cleared POST was intercepted")
@@ -215,10 +203,10 @@ func TestTurnstileFullFlow(t *testing.T) {
 // or the redirect.
 func TestTurnstileUsesOriginalURI(t *testing.T) {
 	newFake(t, testHost, turnstileAction)
-	ts := newTestTurnstile(t, false)
+	ts := newTestTurnstile(t)
 
 	rewritten := func(method string, body url.Values) *http.Request {
-		req := newTurnstileRequest(method, "/articles/hello?x=1", "", body)
+		req := newTurnstileRequest(method, "/articles/hello?x=1", body)
 		orig := *req
 		orig.URL = &url.URL{Path: "/articles/hello", RawQuery: "x=1"}
 		req = req.WithContext(context.WithValue(req.Context(), caddyhttp.OriginalRequestCtxKey, orig))
@@ -237,11 +225,11 @@ func TestTurnstileUsesOriginalURI(t *testing.T) {
 }
 
 func TestTurnstileChallengeCSP(t *testing.T) {
-	ts := newTestTurnstile(t, false)
+	ts := newTestTurnstile(t)
 	rec := httptest.NewRecorder()
 	// A site-wide CSP set by an earlier header directive.
 	rec.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'")
-	req := newTurnstileRequest(http.MethodGet, "/", "", nil)
+	req := newTurnstileRequest(http.MethodGet, "/", nil)
 	if err := ts.ServeHTTP(rec, req, caddyhttp.HandlerFunc(func(http.ResponseWriter, *http.Request) error { return nil })); err != nil {
 		t.Fatal(err)
 	}
@@ -276,12 +264,12 @@ func TestTurnstileChallengeCSP(t *testing.T) {
 
 func TestTurnstileUnrelatedPostIsChallenged(t *testing.T) {
 	f := newFake(t, testHost, turnstileAction)
-	ts := newTestTurnstile(t, false)
+	ts := newTestTurnstile(t)
 
 	for name, req := range map[string]*http.Request{
-		"app form":   newTurnstileRequest(http.MethodPost, "/login", "", url.Values{"user": {"a"}, turnstileTokenField: {"good"}}),
-		"json":       newTurnstileRequest(http.MethodPost, "/api", "", nil),
-		"get marker": newTurnstileRequest(http.MethodGet, "/?"+turnstileMarkerField+"=1&"+turnstileTokenField+"=good", "", nil),
+		"app form":   newTurnstileRequest(http.MethodPost, "/login", url.Values{"user": {"a"}, turnstileTokenField: {"good"}}),
+		"json":       newTurnstileRequest(http.MethodPost, "/api", nil),
+		"get marker": newTurnstileRequest(http.MethodGet, "/?"+turnstileMarkerField+"=1&"+turnstileTokenField+"=good", nil),
 	} {
 		rec, reached := serve(t, ts, req)
 		if reached || rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "cf-turnstile") {
@@ -308,8 +296,8 @@ func TestTurnstileRejectsBadTokens(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFake(t, tc.hostname, tc.action)
-			ts := newTestTurnstile(t, false)
-			rec, reached := serve(t, ts, newTurnstileRequest(http.MethodPost, "/page?a=b", "", solve(tc.token)))
+			ts := newTestTurnstile(t)
+			rec, reached := serve(t, ts, newTurnstileRequest(http.MethodPost, "/page?a=b", solve(tc.token)))
 			if reached || rec.Code != http.StatusForbidden {
 				t.Fatalf("got %d (reached=%v), want 403", rec.Code, reached)
 			}
@@ -333,12 +321,12 @@ func TestTurnstileRejectsBadTokens(t *testing.T) {
 
 func TestTurnstileTokenReplayRejected(t *testing.T) {
 	newFake(t, testHost, turnstileAction)
-	ts := newTestTurnstile(t, false)
+	ts := newTestTurnstile(t)
 
-	if rec, _ := serve(t, ts, newTurnstileRequest(http.MethodPost, "/", "", solve("good"))); rec.Code != http.StatusSeeOther {
+	if rec, _ := serve(t, ts, newTurnstileRequest(http.MethodPost, "/", solve("good"))); rec.Code != http.StatusSeeOther {
 		t.Fatalf("first redemption: got %d, want 303", rec.Code)
 	}
-	if rec, _ := serve(t, ts, newTurnstileRequest(http.MethodPost, "/", "", solve("good"))); rec.Code != http.StatusForbidden {
+	if rec, _ := serve(t, ts, newTurnstileRequest(http.MethodPost, "/", solve("good"))); rec.Code != http.StatusForbidden {
 		t.Errorf("replayed token: got %d, want 403", rec.Code)
 	}
 }
@@ -348,9 +336,9 @@ func TestTurnstileTestingKeys(t *testing.T) {
 	// whatever site the widget is on.
 	f := &fakeSiteverify{hostname: "example.com", testingKey: true}
 	useSiteverify(t, f)
-	ts := newTestTurnstile(t, false)
+	ts := newTestTurnstile(t)
 
-	req := newTurnstileRequest(http.MethodPost, "/", "", solve("good"))
+	req := newTurnstileRequest(http.MethodPost, "/", solve("good"))
 	req.Host = "localhost:8443"
 	if rec, _ := serve(t, ts, req); rec.Code != http.StatusSeeOther {
 		t.Errorf("testing-key result: got %d, want 303", rec.Code)
@@ -359,7 +347,7 @@ func TestTurnstileTestingKeys(t *testing.T) {
 	// Without the testing-key marker, the same missing action is a reject.
 	f2 := &fakeSiteverify{hostname: "example.com"}
 	useSiteverify(t, f2)
-	req = newTurnstileRequest(http.MethodPost, "/", "", solve("good"))
+	req = newTurnstileRequest(http.MethodPost, "/", solve("good"))
 	if rec, _ := serve(t, ts, req); rec.Code != http.StatusForbidden {
 		t.Errorf("production result without action: got %d, want 403", rec.Code)
 	}
@@ -376,9 +364,9 @@ func TestTurnstileSiteverifyUnavailable(t *testing.T) {
 	useSiteverify(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "nope", http.StatusBadGateway)
 	}))
-	ts := newTestTurnstile(t, false)
+	ts := newTestTurnstile(t)
 
-	rec, reached := serve(t, ts, newTurnstileRequest(http.MethodPost, "/x", "", solve("good")))
+	rec, reached := serve(t, ts, newTurnstileRequest(http.MethodPost, "/x", solve("good")))
 	if reached || rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("got %d (reached=%v), want 503", rec.Code, reached)
 	}
@@ -404,7 +392,7 @@ func TestTurnstilePendingVerificationsBounded(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			rec := httptest.NewRecorder()
-			_ = ts.ServeHTTP(rec, newTurnstileRequest(http.MethodPost, "/", "", solve("bad")), nil)
+			_ = ts.ServeHTTP(rec, newTurnstileRequest(http.MethodPost, "/", solve("bad")), nil)
 		}()
 	}
 	deadline := time.Now().Add(5 * time.Second)
@@ -412,7 +400,7 @@ func TestTurnstilePendingVerificationsBounded(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 
-	rec, _ := serve(t, ts, newTurnstileRequest(http.MethodPost, "/", "", solve("good")))
+	rec, _ := serve(t, ts, newTurnstileRequest(http.MethodPost, "/", solve("good")))
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Errorf("third concurrent verification: got %d, want 503", rec.Code)
 	}
@@ -422,16 +410,16 @@ func TestTurnstilePendingVerificationsBounded(t *testing.T) {
 	close(f.hold)
 	wg.Wait()
 
-	if rec, _ := serve(t, ts, newTurnstileRequest(http.MethodPost, "/", "", solve("good"))); rec.Code != http.StatusSeeOther {
+	if rec, _ := serve(t, ts, newTurnstileRequest(http.MethodPost, "/", solve("good"))); rec.Code != http.StatusSeeOther {
 		t.Errorf("after the slots freed up: got %d, want 303", rec.Code)
 	}
 }
 
 func TestTurnstileClearanceValidation(t *testing.T) {
-	ts := newTestTurnstile(t, false)
+	ts := newTestTurnstile(t)
 	now := time.Unix(1_800_000_000, 0)
 	ts.now = func() time.Time { return now }
-	req := newTurnstileRequest(http.MethodGet, "/", "", nil)
+	req := newTurnstileRequest(http.MethodGet, "/", nil)
 
 	fresh := ts.mintClearance(now, req)
 	if !ts.validClearance(fresh, req) {
@@ -463,12 +451,12 @@ func TestTurnstileClearanceValidation(t *testing.T) {
 		}
 	}
 
-	other := newTurnstileRequest(http.MethodGet, "/", "", nil)
+	other := newTurnstileRequest(http.MethodGet, "/", nil)
 	other.Host = "other.example.com:443"
 	if ts.validClearance(fresh, other) {
 		t.Error("clearance for one hostname accepted on another")
 	}
-	withPort := newTurnstileRequest(http.MethodGet, "/", "", nil)
+	withPort := newTurnstileRequest(http.MethodGet, "/", nil)
 	withPort.Host = "EXAMPLE.com:8443"
 	if !ts.validClearance(fresh, withPort) {
 		t.Error("clearance rejected because of the port or case in Host")
@@ -484,8 +472,8 @@ func TestTurnstileClearanceValidation(t *testing.T) {
 }
 
 func TestTurnstileShorterTTLTakesEffectImmediately(t *testing.T) {
-	ts := newTestTurnstile(t, false)
-	req := newTurnstileRequest(http.MethodGet, "/", "", nil)
+	ts := newTestTurnstile(t)
+	req := newTurnstileRequest(http.MethodGet, "/", nil)
 	week := ts.mintClearance(time.Now().Add(-7*24*time.Hour), req)
 	ts.ttl = 24 * time.Hour
 	if ts.validClearance(week, req) {
@@ -493,74 +481,54 @@ func TestTurnstileShorterTTLTakesEffectImmediately(t *testing.T) {
 	}
 }
 
-// clearOnce solves the challenge for fp and returns the cookie issued.
-func clearOnce(t *testing.T, ts *Turnstile, fp string) *http.Cookie {
-	t.Helper()
-	rec, _ := serve(t, ts, newTurnstileRequest(http.MethodPost, "/", fp, solve("good")))
-	if rec.Code != http.StatusSeeOther || len(rec.Result().Cookies()) != 1 {
-		t.Fatalf("clearing %q: got %d with %d cookies", fp, rec.Code, len(rec.Result().Cookies()))
+// Separate protection policies cannot accept or overwrite each other's
+// clearances, even if they share a signing key.
+func TestTurnstileClearancePolicyIsolation(t *testing.T) {
+	const sharedKey = "shared-clearance-signing-key-32-bytes"
+	makePolicy := func(site, secret, cookie string) *Turnstile {
+		t.Helper()
+		ts := &Turnstile{
+			SiteKey: site, SecretKey: secret, ClearanceKey: sharedKey,
+			CookieName: cookie,
+		}
+		if err := ts.Provision(caddy.Context{}); err != nil {
+			t.Fatal(err)
+		}
+		return ts
 	}
-	return rec.Result().Cookies()[0]
-}
-
-func passes(t *testing.T, ts *Turnstile, fp string, cookies ...*http.Cookie) bool {
-	t.Helper()
-	req := newTurnstileRequest(http.MethodGet, "/", fp, nil)
-	for _, c := range cookies {
-		req.AddCookie(c)
+	a := makePolicy("widget-a", "secret-a", "")
+	b := makePolicy("widget-b", "secret-b", "")
+	renamed := makePolicy("widget-a", "secret-a", "other_route")
+	rotated := makePolicy("widget-a", "rotated-secret", "")
+	req := newTurnstileRequest(http.MethodGet, "/private", nil)
+	value := a.mintClearance(time.Now(), req)
+	if !a.validClearance(value, req) || !rotated.validClearance(value, req) {
+		t.Fatal("clearance was not reusable by the same policy after secret rotation")
 	}
-	_, reached := serve(t, ts, req)
-	return reached
-}
-
-func TestTurnstileFingerprintBinding(t *testing.T) {
-	newFake(t, testHost, turnstileAction)
-	ts := newTestTurnstile(t, true)
-
-	c := clearOnce(t, ts, testFP)
-	if c.Name != ts.cookieName(testFP, true) {
-		t.Errorf("bound cookie over TCP is named %q, want %q", c.Name, ts.cookieName(testFP, true))
+	for _, tc := range []struct {
+		name   string
+		policy *Turnstile
+	}{
+		{"different widget", b},
+		{"different cookie prefix", renamed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.policy.cookieName() == a.cookieName() {
+				t.Fatal("different protection policies share cookie names")
+			}
+			if tc.policy.validClearance(value, req) {
+				t.Fatal("clearance accepted by another policy")
+			}
+			request := newTurnstileRequest(http.MethodGet, "/private", nil)
+			request.AddCookie(&http.Cookie{Name: tc.policy.cookieName(), Value: value})
+			if tc.policy.cleared(request) {
+				t.Fatal("transplanted cookie bypassed another policy")
+			}
+		})
 	}
-	if !passes(t, ts, testFP, c) {
-		t.Error("bound clearance rejected for the client it was issued to")
-	}
-	if passes(t, ts, "t13d1311h2_e8f1e7e78f70_d339722ba4af", c) {
-		t.Error("bound clearance accepted from a different fingerprint")
-	}
-	if passes(t, ts, "", c) {
-		t.Error("bound clearance accepted from a request without a fingerprint")
-	}
-
-	// An unbound clearance for the same host and key, put under the bound
-	// cookie's name, must not be accepted: the mode is part of the MAC.
-	unbound := newTestTurnstile(t, false)
-	forged := &http.Cookie{Name: c.Name, Value: unbound.mintClearance(time.Now(), newTurnstileRequest(http.MethodGet, "/", "", nil))}
-	if passes(t, ts, testFP, forged) {
-		t.Error("unbound clearance accepted by a binding handler")
-	}
-
-	// Without binding, the fingerprint is not part of the clearance.
-	v := unbound.mintClearance(time.Now(), newTurnstileRequest(http.MethodGet, "/", testFP, nil))
-	if !unbound.validClearance(v, newTurnstileRequest(http.MethodGet, "/", testFPQUIC, nil)) {
-		t.Error("unbound clearance depended on the fingerprint")
-	}
-}
-
-func TestTurnstileBindingRequiresFingerprint(t *testing.T) {
-	f := newFake(t, testHost, turnstileAction)
-	ts := newTestTurnstile(t, true)
-
-	rec, _ := serve(t, ts, newTurnstileRequest(http.MethodPost, "/", "", solve("good")))
-	if rec.Code != http.StatusForbidden || anyCookie(rec) {
-		t.Errorf("binding with no fingerprint: got %d (cookie=%v), want 403 and no cookie", rec.Code, anyCookie(rec))
-	}
-	if f.calls.Load() != 0 {
-		t.Error("siteverify was called although no clearance could be issued")
-	}
-	// The token was not spent, so the visitor is not worse off once the
-	// fingerprint shows up (e.g. after the operator fixes the config).
-	if f.redeemed.Load() {
-		t.Error("token was redeemed")
+	clone := makePolicy("widget-a", "secret-a", "")
+	if clone.cookieName() != a.cookieName() || !clone.validClearance(value, req) {
+		t.Fatal("identical policies have unstable clearances")
 	}
 }
 
@@ -590,7 +558,6 @@ func TestTurnstileCaddyfile(t *testing.T) {
 		secret_key       sec
 		clearance_ttl    7d
 		cookie_name      cl
-		bind_fingerprint
 		max_pending_verifications 8
 		allow_insecure_cookie
 	}`)
@@ -604,17 +571,6 @@ func TestTurnstileCaddyfile(t *testing.T) {
 	if time.Duration(ts.ClearanceTTL) != 7*24*time.Hour {
 		t.Errorf("clearance_ttl = %v, want 7 days", time.Duration(ts.ClearanceTTL))
 	}
-	if ts.BindFingerprintVar != "ja4_bind" {
-		t.Errorf("bare bind_fingerprint should bind to ja4_bind, got %q", ts.BindFingerprintVar)
-	}
-
-	d = caddyfile.NewTestDispenser(`turnstile {
-		bind_fingerprint fp
-	}`)
-	ts = Turnstile{}
-	if err := ts.UnmarshalCaddyfile(d); err != nil || ts.BindFingerprintVar != "fp" {
-		t.Errorf("bind_fingerprint fp: %q, %v", ts.BindFingerprintVar, err)
-	}
 
 	for _, bad := range []string{
 		"turnstile {\nnope x\n}",
@@ -624,7 +580,6 @@ func TestTurnstileCaddyfile(t *testing.T) {
 		"turnstile {\nverify_path /x\n}",
 		"turnstile {\nmax_pending_verifications 0\n}",
 		"turnstile {\nmax_pending_verifications lots\n}",
-		"turnstile {\nbind_fingerprint a b\n}",
 		"turnstile {\nallow_insecure_cookie yes\n}",
 		`turnstile inline`,
 	} {
@@ -652,7 +607,6 @@ func TestTurnstileProvisionErrors(t *testing.T) {
 		"cookie name space":     ok(func(ts *Turnstile) { ts.CookieName = "bad name" }),
 		"cookie name semicolon": ok(func(ts *Turnstile) { ts.CookieName = "a;b" }),
 		"cookie name equals":    ok(func(ts *Turnstile) { ts.CookieName = "a=b" }),
-		"bad var name":          ok(func(ts *Turnstile) { ts.BindFingerprintVar = "ja4 }" }),
 		"negative pending":      ok(func(ts *Turnstile) { ts.MaxPendingVerifications = -1 }),
 	} {
 		if err := ts.Provision(caddy.Context{}); err == nil {
@@ -675,170 +629,6 @@ func TestTurnstileProvisionExpandsEnv(t *testing.T) {
 	}
 }
 
-// Different TCP ClientHellos (such as h2 versus h1-only) must not replace
-// each other's clearance in a browser's cookie jar.
-func TestTurnstileBindingSurvivesTCPProfileSwitching(t *testing.T) {
-	f := &fakeSiteverify{hostname: testHost, action: turnstileAction}
-	useSiteverify(t, f)
-	ts := newTestTurnstile(t, true)
-	const otherTCP = "t13d1311h1_e8f1e7e78f70_d339722ba4af"
-
-	a := clearOnce(t, ts, testFP)
-	f.redeemed.Store(false)
-	b := clearOnce(t, ts, otherTCP)
-	if a.Name == b.Name {
-		t.Fatalf("different TCP JA4s share cookie name %q", a.Name)
-	}
-	for i, fp := range []string{testFP, otherTCP, testFP, otherTCP} {
-		if !passes(t, ts, fp, a, b) {
-			t.Errorf("profile switch %d: clearance lost", i)
-		}
-	}
-}
-
-// Two independent path-scoped policies on the same host must not overwrite
-// each other's cookies, with or without JA4 binding.
-func TestTurnstileCookieNamesIsolateConfigurations(t *testing.T) {
-	for _, bound := range []bool{false, true} {
-		t.Run(fmt.Sprintf("bound=%t", bound), func(t *testing.T) {
-			f := &fakeSiteverify{hostname: testHost, action: turnstileAction}
-			useSiteverify(t, f)
-			a := newTestTurnstile(t, bound)
-			b := &Turnstile{SiteKey: testSiteKey, SecretKey: testSecretKey, ClearanceKey: strings.Repeat("b", 32)}
-			if bound {
-				b.BindFingerprintVar = "ja4"
-			}
-			if err := b.Provision(caddy.Context{}); err != nil {
-				t.Fatal(err)
-			}
-			fp := ""
-			if bound {
-				fp = testFP
-			}
-			ca := clearOnce(t, a, fp)
-			f.redeemed.Store(false)
-			cb := clearOnce(t, b, fp)
-			if ca.Name == cb.Name {
-				t.Fatalf("different signing keys share cookie %q", ca.Name)
-			}
-			for i, ts := range []*Turnstile{a, b, a, b} {
-				if !passes(t, ts, fp, ca, cb) {
-					t.Errorf("policy switch %d: clearance lost", i)
-				}
-			}
-			// Identical instances must agree on cookie names and MACs.
-			clone := newTestTurnstile(t, bound)
-			if clone.cookieName(fp, bound) != ca.Name || !passes(t, clone, fp, ca, cb) {
-				t.Error("clearance was not stable across identical instances")
-			}
-			differentWidget := newTestTurnstile(t, bound)
-			differentWidget.SiteKey = "another-widget-key"
-			if differentWidget.cookieName(fp, bound) == ca.Name {
-				t.Error("different site keys share a cookie slot")
-			}
-			differentSecret := &Turnstile{SiteKey: testSiteKey, SecretKey: "another-secret"}
-			if bound {
-				differentSecret.BindFingerprintVar = "ja4"
-			}
-			if err := differentSecret.Provision(caddy.Context{}); err != nil {
-				t.Fatal(err)
-			}
-			if differentSecret.cookieName(fp, bound) == ca.Name {
-				t.Error("different default-derived signing keys share a cookie slot")
-			}
-		})
-	}
-}
-
-// Cookie names alone are not security boundaries: a client can put one
-// policy's signed value under another policy's cookie name. The MAC must
-// bind the policy identity, even with a deliberately shared clearance_key.
-func TestTurnstileClearanceMACIsolatesPolicy(t *testing.T) {
-	const sharedKey = "shared-clearance-signing-key-32-bytes"
-	for _, bound := range []bool{false, true} {
-		t.Run(fmt.Sprintf("bound=%t", bound), func(t *testing.T) {
-			newPolicy := func(siteKey, secretKey, varName, cookieName string) *Turnstile {
-				t.Helper()
-				ts := &Turnstile{SiteKey: siteKey, SecretKey: secretKey, ClearanceKey: sharedKey, BindFingerprintVar: varName, CookieName: cookieName}
-				if err := ts.Provision(caddy.Context{}); err != nil {
-					t.Fatal(err)
-				}
-				return ts
-			}
-			varName, fp := "", ""
-			if bound {
-				varName, fp = "ja4", testFP
-			}
-			a := newPolicy("widget-a", "secret-a", varName, "")
-			b := newPolicy("widget-b", "secret-b", varName, "")
-			req := newTurnstileRequest(http.MethodGet, "/private", fp, nil)
-			signedByA := a.mintClearance(time.Now(), req)
-			if !a.validClearance(signedByA, req) {
-				t.Fatal("policy A rejected its own clearance")
-			}
-			if b.validClearance(signedByA, req) {
-				t.Error("policy B accepted policy A's value with the same clearance_key")
-			}
-			// Deliberately transplant A's value into B's cookie slot.
-			req.AddCookie(&http.Cookie{Name: b.cookieName(fp, bound), Value: signedByA})
-			if rec, reached := serve(t, b, req); rec.Code != http.StatusForbidden || reached {
-				t.Error("policy B accepted a value from policy A under B's cookie name")
-			}
-			// A stable clearance_key intentionally survives Turnstile
-			// secret_key rotation for the *same* widget.
-			rotated := newPolicy("widget-a", "rotated-secret", varName, "")
-			if !rotated.validClearance(signedByA, req) {
-				t.Error("secret_key rotation invalidated the existing clearance")
-			}
-			// Explicit cookie prefixes isolate policies even when every key,
-			// widget and binding setting is otherwise identical. The browser's
-			// cookie name is not part of the signed value sent by a client.
-			renamed := newPolicy("widget-a", "secret-a", varName, "route_b")
-			if a.cookieName(fp, bound) == renamed.cookieName(fp, bound) {
-				t.Fatal("different cookie prefixes share a cookie name")
-			}
-			if renamed.validClearance(signedByA, req) {
-				t.Error("different cookie prefix accepted a clearance value from policy A")
-			}
-			renameReq := newTurnstileRequest(http.MethodGet, "/private", fp, nil)
-			renameReq.AddCookie(&http.Cookie{Name: renamed.cookieName(fp, bound), Value: signedByA})
-			if rec, reached := serve(t, renamed, renameReq); rec.Code != http.StatusForbidden || reached {
-				t.Error("different cookie prefix accepted a transplanted clearance")
-			}
-			signedByRenamed := renamed.mintClearance(time.Now(), req)
-			if !renamed.validClearance(signedByRenamed, req) {
-				t.Error("renamed policy rejected its own clearance")
-			}
-			if a.validClearance(signedByRenamed, req) {
-				t.Error("policy A accepted a clearance signed for another cookie prefix")
-			}
-			originalReq := newTurnstileRequest(http.MethodGet, "/private", fp, nil)
-			originalReq.AddCookie(&http.Cookie{Name: a.cookieName(fp, bound), Value: signedByRenamed})
-			if rec, reached := serve(t, a, originalReq); rec.Code != http.StatusForbidden || reached {
-				t.Error("policy A accepted a transplanted clearance from a renamed policy")
-			}
-			renameRotated := newPolicy("widget-a", "rotated-secret", varName, "route_b")
-			if !renameRotated.validClearance(signedByRenamed, req) {
-				t.Error("secret_key rotation invalidated the renamed policy's clearance")
-			}
-			if bound {
-				// Same fingerprint under a different http.vars key also
-				// belongs to a different policy.
-				c := newPolicy("widget-a", "secret-a", "alternate", "")
-				otherReq := newTurnstileRequest(http.MethodGet, "/private", fp, nil)
-				caddyhttp.SetVar(otherReq.Context(), "alternate", fp)
-				if c.validClearance(signedByA, otherReq) {
-					t.Error("different fingerprint variable accepted another policy's clearance")
-				}
-				otherReq.AddCookie(&http.Cookie{Name: c.cookieName(fp, true), Value: signedByA})
-				if rec, reached := serve(t, c, otherReq); rec.Code != http.StatusForbidden || reached {
-					t.Error("different fingerprint variable accepted a transplanted clearance")
-				}
-			}
-		})
-	}
-}
-
 func TestTurnstileSecureCookiesBehindTLSProxy(t *testing.T) {
 	f := newFake(t, testHost, turnstileAction)
 	for _, tc := range []struct {
@@ -857,7 +647,7 @@ func TestTurnstileSecureCookiesBehindTLSProxy(t *testing.T) {
 			if err := ts.Provision(caddy.Context{}); err != nil {
 				t.Fatal(err)
 			}
-			r := newTurnstileRequest(http.MethodPost, "/", "", solve("good"))
+			r := newTurnstileRequest(http.MethodPost, "/", solve("good"))
 			r.TLS = nil // Caddy sees only the plain HTTP hop from a TLS proxy.
 			if tc.forwarded != "" {
 				r.Header.Set("X-Forwarded-Proto", tc.forwarded)
@@ -866,7 +656,7 @@ func TestTurnstileSecureCookiesBehindTLSProxy(t *testing.T) {
 			if rec.Code != http.StatusSeeOther {
 				t.Fatalf("verify status = %d, want 303", rec.Code)
 			}
-			c := cookieFrom(rec, ts.cookieName("", false))
+			c := cookieFrom(rec, ts.cookieName())
 			if c == nil || c.Secure != tc.wantSecure || !c.HttpOnly {
 				t.Errorf("cookie = %+v; want Secure=%t and HttpOnly", c, tc.wantSecure)
 			}

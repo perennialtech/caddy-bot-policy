@@ -12,13 +12,10 @@ import (
 // parseCaddyfile sets up a bot_policy handler from Caddyfile tokens.
 //
 //	bot_policy {
-//		var_name               ja4
 //		asn_db                 /var/lib/geoip/GeoLite2-ASN.mmdb
 //		whitelist              192.0.2.10 2001:db8:1::/48 "ua:(?i)googlebot"
 //		whitelist              asn:13335
-//		blacklist              t13d1517h2_8daaf6152771_b6f405a00624
-//		blacklist              198.51.100.0/24 q13d0312h3_55b375c5d22e_cd8dafe46ac5
-//		on_missing_fingerprint open
+//		blacklist              198.51.100.0/24
 //		action                 block-403
 //	}
 func parseCaddyfile(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error) {
@@ -46,15 +43,6 @@ func (bp *BotPolicy) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 					return d.ArgErr()
 				}
 
-			case "var_name":
-				if !d.NextArg() {
-					return d.ArgErr()
-				}
-				bp.VarName = d.Val()
-				if d.NextArg() {
-					return d.ArgErr()
-				}
-
 			case "whitelist", "blacklist":
 				sub := d.Val()
 				args := d.RemainingArgs()
@@ -65,15 +53,6 @@ func (bp *BotPolicy) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 					bp.Whitelist = append(bp.Whitelist, args...)
 				} else {
 					bp.Blacklist = append(bp.Blacklist, args...)
-				}
-
-			case "on_missing_fingerprint":
-				if !d.NextArg() {
-					return d.ArgErr()
-				}
-				bp.OnMissingFingerprint = d.Val()
-				if d.NextArg() {
-					return d.ArgErr()
 				}
 
 			case "action":
@@ -101,7 +80,6 @@ func (bp *BotPolicy) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 //		clearance_key    <at least 32 bytes>
 //		clearance_ttl    30d
 //		cookie_name      bp_clearance
-//		bind_fingerprint [<var_name>]
 //		max_pending_verifications 64
 //		allow_insecure_cookie  # HTTP-only local development; never production
 //	}
@@ -122,15 +100,6 @@ func (ts *Turnstile) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 		for d.NextBlock(0) {
 			sub := d.Val()
 			switch sub {
-			case "bind_fingerprint":
-				ts.BindFingerprintVar = "ja4_bind"
-				if d.NextArg() {
-					ts.BindFingerprintVar = d.Val()
-				}
-				if d.NextArg() {
-					return d.ArgErr()
-				}
-				continue
 			case "allow_insecure_cookie":
 				if d.NextArg() {
 					return d.ArgErr()

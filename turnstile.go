@@ -16,7 +16,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -65,16 +64,12 @@ const (
 	// clearanceKeyLabel separates the HMAC key derived from the Turnstile
 	// secret from any other use of that secret.
 	clearanceKeyLabel = "caddy-bot-policy/turnstile/clearance/v1"
-	// Cookie names must differ across signing configurations and, when
-	// binding is enabled, across complete fingerprints. Otherwise visiting
-	// one protected route/profile overwrites another route/profile's cookie.
+	// Cookie names distinguish different signing configurations.
 	clearanceCookieLabel = "caddy-bot-policy/turnstile/cookie/v3\x00"
 	// Version 3 also authenticates the configured cookie prefix. Older
 	// clearances cannot cross into policies with a different cookie_name.
 	clearanceVersion = "3"
 )
-
-var varNamePattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 
 // Turnstile is an HTTP middleware that requires a Cloudflare Turnstile
 // clearance before letting a request through.
@@ -88,19 +83,17 @@ var varNamePattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 // that fails verification is answered with a 403 and no cookie.
 //
 // The cookie is stateless: it carries the time it was issued and an
-// HMAC-SHA256 over that time, the policy identity, the site's hostname
-// and, optionally, the client's JA4 fingerprint. Nothing is stored server-
-// side, so it works unchanged across restarts and across several Caddy
+// HMAC-SHA256 over that time, the policy identity and the hostname.
+// Nothing is stored server-side, so it works across restarts and Caddy
 // instances that share the same keys.
 //
-// It is a bearer credential: anything that presents the cookie (with the
-// same fingerprint, if bound) is treated as having solved the challenge.
+// It is a bearer credential: anyone presenting the cookie is treated
+// as having solved the challenge.
 //
 //	turnstile {
 //		site_key         {env.TURNSTILE_SITE_KEY}
 //		secret_key       {env.TURNSTILE_SECRET_KEY}
 //		clearance_ttl    30d
-//		bind_fingerprint ja4
 //	}
 type Turnstile struct {
 	// SiteKey is the public key of the Turnstile widget. Required.
@@ -122,16 +115,8 @@ type Turnstile struct {
 	ClearanceTTL caddy.Duration `json:"clearance_ttl,omitempty"`
 
 	// CookieName is the prefix of the clearance cookie name. The final name
-	// also carries a stable, keyed namespace for this configuration and,
-	// when binding is enabled, the complete fingerprint.
+	// also carries a stable, keyed namespace for this configuration.
 	CookieName string `json:"cookie_name,omitempty"`
-
-	// BindFingerprintVar, if set, names the http.vars.* key holding the
-	// client's resumption-insensitive fingerprint (normally "ja4_bind",
-	// published by the ja4 handler). A clearance is only issued to a
-	// request that has a fingerprint, and accepted from a client with the same
-	// fingerprint. Requests without one are never cleared.
-	BindFingerprintVar string `json:"bind_fingerprint_var,omitempty"`
 
 	// MaxPendingVerifications caps how many siteverify calls this handler
 	// has in flight at once. Submissions beyond it get a 503 without
@@ -208,10 +193,6 @@ func (ts *Turnstile) Provision(ctx caddy.Context) error {
 		return fmt.Errorf("turnstile: invalid cookie_name %q: %v", ts.CookieName, err)
 	}
 
-	if ts.BindFingerprintVar != "" && !varNamePattern.MatchString(ts.BindFingerprintVar) {
-		return fmt.Errorf("turnstile: invalid bind_fingerprint variable name %q", ts.BindFingerprintVar)
-	}
-
 	if ts.MaxPendingVerifications == 0 {
 		ts.MaxPendingVerifications = defaultMaxPendingVerifications
 	}
@@ -257,15 +238,6 @@ func (ts *Turnstile) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 	return ts.challenge(w, r)
 }
 
-// fingerprint returns the bound fingerprint for r and whether binding is
-// on. With binding on, an empty fingerprint means r cannot be cleared.
-func (ts *Turnstile) fingerprint(r *http.Request) (string, bool) {
-	if ts.BindFingerprintVar == "" {
-		return "", false
-	}
-	return trustedFingerprint(r, ts.BindFingerprintVar), true
-}
-
 // writeMACField uses length-prefix framing so the policy fields cannot be
 // reinterpreted by moving delimiters between them.
 func writeMACField(mac hash.Hash, field string) {
@@ -274,39 +246,25 @@ func writeMACField(mac hash.Hash, field string) {
 	mac.Write([]byte(field))
 }
 
-// writePolicyIdentity binds the widget, fingerprint variable and cookie
-// prefix to each signed clearance, so copying a value to another policy's
+// writePolicyIdentity binds the widget and cookie prefix to each signed
+// clearance, so copying a value to another policy's
 // cookie name cannot bypass that policy. It excludes the verification secret
 // so an explicit clearance_key survives secret_key rotation.
 func (ts *Turnstile) writePolicyIdentity(mac hash.Hash) {
 	writeMACField(mac, ts.SiteKey)
-	writeMACField(mac, ts.BindFingerprintVar)
 	writeMACField(mac, ts.CookieName)
 }
 
-// cookieName isolates different protection configurations, and (when bound)
-// every distinct JA4, not just the transport. This prevents browsers that
-// alternate TLS/ALPN profiles or protected routes from overwriting their
-// previously solved clearances. Keyed names don't disclose the fingerprint.
-func (ts *Turnstile) cookieName(fp string, bound bool) string {
+// cookieName isolates independently configured Turnstile policies.
+func (ts *Turnstile) cookieName() string {
 	mac := hmac.New(sha256.New, ts.key)
 	mac.Write([]byte(clearanceCookieLabel))
 	ts.writePolicyIdentity(mac)
-	if bound {
-		mac.Write([]byte("bound\x00"))
-		writeMACField(mac, fp)
-	} else {
-		mac.Write([]byte("unbound"))
-	}
 	return ts.CookieName + "_" + base64.RawURLEncoding.EncodeToString(mac.Sum(nil)[:16])
 }
 
 func (ts *Turnstile) cleared(r *http.Request) bool {
-	fp, bound := ts.fingerprint(r)
-	if bound && fp == "" {
-		return false
-	}
-	c, err := r.Cookie(ts.cookieName(fp, bound))
+	c, err := r.Cookie(ts.cookieName())
 	return err == nil && ts.validClearance(c.Value, r)
 }
 
@@ -317,11 +275,8 @@ func (ts *Turnstile) mintClearance(issued time.Time, r *http.Request) string {
 }
 
 // validClearance reports whether value is a clearance this handler issued
-// for this host (and fingerprint, if bound) that has not expired.
+// for this host that has not expired.
 func (ts *Turnstile) validClearance(value string, r *http.Request) bool {
-	if fp, bound := ts.fingerprint(r); bound && fp == "" {
-		return false
-	}
 	version, rest, ok := strings.Cut(value, ".")
 	if !ok || version != clearanceVersion {
 		return false
@@ -355,14 +310,6 @@ func (ts *Turnstile) clearanceMAC(iat string, r *http.Request) []byte {
 	mac.Write([]byte{0})
 	mac.Write([]byte(requestHostname(r)))
 	mac.Write([]byte{0})
-	// The mode byte keeps bound and unbound clearances apart even if the
-	// same key were used for both.
-	if fp, bound := ts.fingerprint(r); bound {
-		mac.Write([]byte("j"))
-		mac.Write([]byte(fp))
-	} else {
-		mac.Write([]byte("-"))
-	}
 	return mac.Sum(nil)
 }
 
@@ -480,19 +427,6 @@ func (ts *Turnstile) verify(w http.ResponseWriter, r *http.Request) error {
 	if token == "" || len(token) > maxTurnstileToken {
 		return ts.reject(w, r, "missing or oversized token", nil)
 	}
-	fp, bound := ts.fingerprint(r)
-	if bound && fp == "" {
-		// Checked before calling Cloudflare: there is nothing to bind to,
-		// so no clearance could be issued anyway. This is almost always a
-		// configuration problem (missing listener or packet conn wrapper,
-		// or a var name that does not match the ja4 handler's).
-		ts.logger.Warn("turnstile cannot issue a bound clearance: request has no fingerprint",
-			zap.String("var_name", ts.BindFingerprintVar),
-			zap.String("proto", r.Proto),
-		)
-		return ts.reject(w, r, "no fingerprint to bind", nil)
-	}
-
 	select {
 	case ts.pending <- struct{}{}:
 		defer func() { <-ts.pending }()
@@ -525,7 +459,7 @@ func (ts *Turnstile) verify(w http.ResponseWriter, r *http.Request) error {
 
 	now := ts.now()
 	http.SetCookie(w, &http.Cookie{
-		Name:     ts.cookieName(fp, bound),
+		Name:     ts.cookieName(),
 		Value:    ts.mintClearance(now, r),
 		Path:     "/",
 		Expires:  now.Add(ts.ttl),

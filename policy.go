@@ -18,23 +18,12 @@ import (
 	"go.uber.org/zap"
 )
 
-// BotPolicy applies whitelists and blacklists to client IP addresses,
-// TLS client fingerprints (JA4), User-Agent headers, and ASNs. Fingerprints come
-// from the ja4 handler, which needs the ja4 listener or packet conn wrapper
-// to have captured the ClientHello.
+// BotPolicy applies whitelists and blacklists to client IPs,
+// User-Agent headers and ASNs.
 type BotPolicy struct {
-	// VarName names the fingerprint to match: the ja4 handler's var_name or
-	// bind_var_name. It is read from the ja4 handler directly, not from the
-	// request variable, which other directives can overwrite. Defaults to
-	// "ja4".
-	VarName string `json:"var_name,omitempty"`
-
-	// Whitelist contains JA4 identifiers, IPv4/IPv6 addresses and CIDRs,
-	// ua:-prefixed Go regular expressions, and asn:-prefixed AS numbers.
-	// Any match bypasses on_missing_fingerprint closed and downstream
-	// Turnstile challenges, unless Blacklist also matches.
-	// IP and ASN matching use Caddy's resolved client IP, respecting trusted_proxies.
-	// At least one entry in Whitelist or Blacklist is required.
+	// Whitelist contains IPs, CIDRs, ua:-prefixed regular expressions
+	// and asn:-prefixed AS numbers. A match bypasses Turnstile unless
+	// the blacklist also matches. IPs use Caddy client IP resolution.
 	Whitelist []string `json:"whitelist,omitempty"`
 
 	// Blacklist accepts the same entries as Whitelist. Any match receives
@@ -47,12 +36,6 @@ type BotPolicy struct {
 	// It is required when either policy list has an asn: entry. An unreadable
 	// or incompatible database rejects the configuration at startup.
 	ASNDB string `json:"asn_db,omitempty"`
-
-	// OnMissingFingerprint is "open" (let the request through when the ja4
-	// handler published no fingerprint under var_name) or "closed" (block
-	// it). Defaults to "open". All lists are evaluated before this policy,
-	// including ASN and User-Agent rules when the fingerprint is missing.
-	OnMissingFingerprint string `json:"on_missing_fingerprint,omitempty"`
 
 	// Action is the response taken when a request is blocked. Only
 	// "block-403" is currently supported: responds 403 and attaches a
@@ -70,18 +53,12 @@ type BotPolicy struct {
 type policyWhitelistKey struct{}
 
 type policyList struct {
-	fingerprints map[string]bool
-	ips          caddyhttp.MatchClientIP
-	userAgents   []*regexp.Regexp
-	asns         map[uint32]bool
+	ips        caddyhttp.MatchClientIP
+	userAgents []*regexp.Regexp
+	asns       map[uint32]bool
 }
 
-// Matches the fixed-width identifiers produced by clientHello.ja4,
-// including the uppercase ALPN characters permitted by alpnCode.
-var ja4Identifier = regexp.MustCompile(`^[tq]([0-9]{2}|s[123])[di][0-9]{4}[a-zA-Z0-9]{2}_[0-9a-f]{12}_[0-9a-f]{12}$`)
-
 func (list *policyList) provision(ctx caddy.Context, entries []string) error {
-	list.fingerprints = make(map[string]bool)
 	list.ips = caddyhttp.MatchClientIP{}
 	list.userAgents = nil
 	list.asns = make(map[uint32]bool)
@@ -104,8 +81,6 @@ func (list *policyList) provision(ctx caddy.Context, entries []string) error {
 				return fmt.Errorf("invalid User-Agent pattern %q: %w", entry, err)
 			}
 			list.userAgents = append(list.userAgents, re)
-		} else if ja4Identifier.MatchString(entry) {
-			list.fingerprints[entry] = true
 		} else {
 			list.ips.Ranges = append(list.ips.Ranges, entry)
 		}
@@ -113,10 +88,7 @@ func (list *policyList) provision(ctx caddy.Context, entries []string) error {
 	return list.ips.Provision(ctx)
 }
 
-func (list policyList) match(r *http.Request, fingerprint string, asn uint32) (bool, error) {
-	if list.fingerprints[fingerprint] {
-		return true, nil
-	}
+func (list policyList) match(r *http.Request, asn uint32) (bool, error) {
 	if asn != 0 && list.asns[asn] {
 		return true, nil
 	}
@@ -141,22 +113,9 @@ func (BotPolicy) CaddyModule() caddy.ModuleInfo {
 	}
 }
 
-// Provision validates the lists and indexes the fingerprints for O(1) lookup.
+// Provision validates and indexes the policy lists.
 func (bp *BotPolicy) Provision(ctx caddy.Context) error {
 	bp.logger = ctx.Logger()
-
-	if bp.VarName == "" {
-		bp.VarName = defaultVarName
-	}
-
-	if bp.OnMissingFingerprint == "" {
-		bp.OnMissingFingerprint = "open"
-	}
-	switch bp.OnMissingFingerprint {
-	case "open", "closed":
-	default:
-		return fmt.Errorf("bot_policy: on_missing_fingerprint must be 'open' or 'closed', got %q", bp.OnMissingFingerprint)
-	}
 
 	if bp.Action == "" {
 		bp.Action = "block-403"
@@ -208,7 +167,6 @@ func (bp *BotPolicy) Validate() error {
 
 // ServeHTTP implements caddyhttp.MiddlewareHandler.
 func (bp *BotPolicy) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
-	fingerprint := trustedFingerprint(r, bp.VarName)
 	// In 0-RTT, the source IP is not yet verified. A known blacklist
 	// match can still block, and a non-IP whitelist can still bypass
 	// when there are no unresolved ASN blacklist rules.
@@ -232,17 +190,17 @@ func (bp *BotPolicy) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 			}
 		}
 	}
-	blacklisted, err := bp.blacklist.match(r, fingerprint, asn)
+	blacklisted, err := bp.blacklist.match(r, asn)
 	if err != nil {
 		return err
 	}
 	if blacklisted {
-		return bp.block(w, r, fingerprint)
+		return bp.block(w, r)
 	}
 	if early && len(bp.blacklist.asns) > 0 {
 		return caddyhttp.Error(http.StatusTooEarly, fmt.Errorf("TLS handshake not complete, client IP cannot be verified"))
 	}
-	whitelisted, err := bp.whitelist.match(r, fingerprint, asn)
+	whitelisted, err := bp.whitelist.match(r, asn)
 	if err != nil {
 		return err
 	}
@@ -253,23 +211,15 @@ func (bp *BotPolicy) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 	if early {
 		return caddyhttp.Error(http.StatusTooEarly, fmt.Errorf("TLS handshake not complete, client IP cannot be verified"))
 	}
-	if fingerprint == "" && bp.OnMissingFingerprint == "closed" {
-		return bp.block(w, r, fingerprint)
-	}
 	return next.ServeHTTP(w, r)
 }
 
-func (bp *BotPolicy) block(w http.ResponseWriter, r *http.Request, fingerprint string) error {
+func (bp *BotPolicy) block(w http.ResponseWriter, r *http.Request) error {
 	id := newBlockID("bp-")
 
-	logFingerprint := fingerprint
-	if logFingerprint == "" {
-		logFingerprint = "(missing)"
-	}
 	bp.logger.Info("blocked request",
 		zap.String("block_id", id),
 		zap.String("remote_addr", r.RemoteAddr),
-		zap.String("fingerprint", logFingerprint),
 		zap.String("host", r.Host),
 		zap.String("uri", r.RequestURI),
 	)

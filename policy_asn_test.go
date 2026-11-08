@@ -74,32 +74,28 @@ func parseASNPolicy(t *testing.T, db, rules string) *BotPolicy {
 func TestASNPolicyRules(t *testing.T) {
 	db := testASNDatabase(t, "GeoLite2-ASN")
 	for _, tt := range []struct {
-		name, rules, ip, fingerprint, agent string
-		status                              int
-		challenge                           bool
+		name, rules, ip, agent string
+		status                 int
+		challenge              bool
 	}{
-		{"IPv4 ASN blacklist", "blacklist asn:13335", "203.0.113.7", "", "", 403, false},
-		{"IPv6 ASN blacklist", "blacklist asn:64500", "2001:db8:abcd::7", "", "", 403, false},
-		{"IPv4-mapped IPv6", "blacklist asn:13335", "::ffff:203.0.113.7", "", "", 403, false},
-		{"ASN whitelist bypasses Turnstile", "whitelist asn:13335", "203.0.113.7", testFP, "", 200, false},
-		{"ASN whitelist without JA4", "whitelist asn:13335\non_missing_fingerprint closed", "203.0.113.7", "", "", 200, false},
-		{"ASN blacklist defeats IP whitelist", "whitelist 203.0.113.7\nblacklist asn:13335", "203.0.113.7", testFP, "", 403, false},
-		{"ASN blacklist defeats JA4 whitelist", "whitelist " + testFP + "\nblacklist asn:13335", "203.0.113.7", testFP, "", 403, false},
-		{"ASN blacklist defeats UA whitelist", "whitelist ua:GoodBot\nblacklist asn:13335", "203.0.113.7", "", "GoodBot", 403, false},
-		{"IP blacklist defeats ASN whitelist", "whitelist asn:13335\nblacklist 203.0.113.0/24", "203.0.113.7", testFP, "", 403, false},
-		{"JA4 blacklist defeats ASN whitelist", "whitelist asn:13335\nblacklist " + testFP, "203.0.113.7", testFP, "", 403, false},
-		{"UA blacklist defeats ASN whitelist", "whitelist asn:13335\nblacklist ua:BadBot", "203.0.113.7", "", "BadBot", 403, false},
-		{"ASN blacklist defeats ASN whitelist", "whitelist asn:13335\nblacklist asn:13335", "203.0.113.7", testFP, "", 403, false},
-		{"unmatched ASN gets Turnstile", "blacklist asn:13335", "198.51.100.7", testFP, "", 403, true},
-		{"unmatched ASN preserves missing-fingerprint closed", "whitelist asn:13335\non_missing_fingerprint closed", "198.51.100.7", "", "", 403, false},
-		{"unmapped IPv6", "blacklist asn:64500", "2001:db8:eeee::1", testFP, "", 403, true},
-		{"other ASN is not a match", "blacklist asn:64500", "203.0.113.7", testFP, "", 403, true},
-		{"mixed list types", "whitelist 198.51.100.7 ua:GoodBot asn:13335 " + testFP, "203.0.113.7", "", "", 200, false},
+		{"IPv4 ASN blacklist", "blacklist asn:13335", "203.0.113.7", "", 403, false},
+		{"IPv6 ASN blacklist", "blacklist asn:64500", "2001:db8:abcd::7", "", 403, false},
+		{"IPv4-mapped IPv6", "blacklist asn:13335", "::ffff:203.0.113.7", "", 403, false},
+		{"ASN whitelist bypasses Turnstile", "whitelist asn:13335", "203.0.113.7", "", 200, false},
+		{"ASN blacklist defeats IP whitelist", "whitelist 203.0.113.7\nblacklist asn:13335", "203.0.113.7", "", 403, false},
+		{"ASN blacklist defeats UA whitelist", "whitelist ua:GoodBot\nblacklist asn:13335", "203.0.113.7", "GoodBot", 403, false},
+		{"IP blacklist defeats ASN whitelist", "whitelist asn:13335\nblacklist 203.0.113.0/24", "203.0.113.7", "", 403, false},
+		{"UA blacklist defeats ASN whitelist", "whitelist asn:13335\nblacklist ua:BadBot", "203.0.113.7", "BadBot", 403, false},
+		{"ASN blacklist defeats ASN whitelist", "whitelist asn:13335\nblacklist asn:13335", "203.0.113.7", "", 403, false},
+		{"unmatched ASN gets Turnstile", "blacklist asn:13335", "198.51.100.7", "", 403, true},
+		{"unmapped IPv6", "blacklist asn:64500", "2001:db8:eeee::1", "", 403, true},
+		{"other ASN is not a match", "blacklist asn:64500", "203.0.113.7", "", 403, true},
+		{"mixed list types", "whitelist 198.51.100.7 ua:GoodBot asn:13335", "203.0.113.7", "", 200, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			bp := parseASNPolicy(t, db, tt.rules)
-			ts := newTestTurnstile(t, true)
-			req := newTurnstileRequest(http.MethodGet, "https://"+testHost+"/", tt.fingerprint, nil)
+			ts := newTestTurnstile(t)
+			req := newTurnstileRequest(http.MethodGet, "https://"+testHost+"/", nil)
 			req.TLS.HandshakeComplete = true
 			req.Header.Set("User-Agent", tt.agent)
 			caddyhttp.SetVar(req.Context(), caddyhttp.ClientIPVarKey, tt.ip)
@@ -129,7 +125,7 @@ func TestASNPolicyUsesCaddyClientIP(t *testing.T) {
 		{"trusted proxy resolved client", "203.0.113.7", 403},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			req := newTurnstileRequest(http.MethodGet, "https://"+testHost+"/", "", nil)
+			req := newTurnstileRequest(http.MethodGet, "https://"+testHost+"/", nil)
 			req.TLS.HandshakeComplete = true
 			req.RemoteAddr = "198.51.100.7:1234"
 			req.Header.Set("X-Forwarded-For", "203.0.113.7")
@@ -149,11 +145,11 @@ func TestASNPolicyUsesCaddyClientIP(t *testing.T) {
 func TestASNBlacklistOverridesTurnstileClearance(t *testing.T) {
 	db := testASNDatabase(t, "GeoLite2-ASN")
 	bp := parseASNPolicy(t, db, "blacklist asn:13335")
-	ts := newTestTurnstile(t, true)
-	req := newTurnstileRequest(http.MethodGet, "https://"+testHost+"/", testFP, nil)
+	ts := newTestTurnstile(t)
+	req := newTurnstileRequest(http.MethodGet, "https://"+testHost+"/", nil)
 	req.TLS.HandshakeComplete = true
 	caddyhttp.SetVar(req.Context(), caddyhttp.ClientIPVarKey, "203.0.113.7")
-	req.AddCookie(&http.Cookie{Name: ts.cookieName(testFP, true), Value: ts.mintClearance(ts.now(), req)})
+	req.AddCookie(&http.Cookie{Name: ts.cookieName(), Value: ts.mintClearance(ts.now(), req)})
 	if !ts.cleared(req) {
 		t.Fatal("test clearance must be valid")
 	}
@@ -172,19 +168,17 @@ func TestASNBlacklistOverridesTurnstileClearance(t *testing.T) {
 func TestASNPolicyRejectsUnverifiedClientIP(t *testing.T) {
 	db := testASNDatabase(t, "GeoLite2-ASN")
 	for _, tt := range []struct {
-		name, rules, fingerprint, agent string
-		status                          int
+		name, rules, agent string
+		status             int
 	}{
-		{"ASN-only whitelist needs verified IP", "whitelist asn:13335", "", "", 425},
-		{"UA whitelist can bypass without ASN blacklist", "whitelist asn:13335 ua:GoodBot", "", "GoodBot", 200},
-		{"JA4 whitelist can bypass without ASN blacklist", "whitelist asn:13335 " + testFP, testFP, "", 200},
-		{"ASN blacklist prevents premature UA bypass", "blacklist asn:13335\nwhitelist ua:GoodBot", "", "GoodBot", 425},
-		{"UA blacklist still blocks", "blacklist asn:13335 ua:BadBot", "", "BadBot", 403},
-		{"JA4 blacklist still blocks", "blacklist asn:13335 " + testFP, testFP, "", 403},
+		{"ASN-only whitelist needs verified IP", "whitelist asn:13335", "", 425},
+		{"UA whitelist can bypass without ASN blacklist", "whitelist asn:13335 ua:GoodBot", "GoodBot", 200},
+		{"ASN blacklist prevents premature UA bypass", "blacklist asn:13335\nwhitelist ua:GoodBot", "GoodBot", 425},
+		{"UA blacklist still blocks", "blacklist asn:13335 ua:BadBot", "BadBot", 403},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			bp := parseASNPolicy(t, db, tt.rules)
-			req := newTurnstileRequest(http.MethodGet, "https://"+testHost+"/", tt.fingerprint, nil)
+			req := newTurnstileRequest(http.MethodGet, "https://"+testHost+"/", nil)
 			req.Header.Set("User-Agent", tt.agent)
 			caddyhttp.SetVar(req.Context(), caddyhttp.ClientIPVarKey, "203.0.113.7")
 			// An early-data request cannot establish its source IP securely.

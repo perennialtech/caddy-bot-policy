@@ -1,14 +1,13 @@
 services:
-  caddy:
-    image: caddy:2.11.9
+  nginx:
+    build:
+      context: .
+      dockerfile: front.Dockerfile
+    depends_on:
+      - filter
     ports:
       - 80:80
       - 443:443
-      - 443:443/udp
-    volumes:
-      - ./front.Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
 
   filter:
     build: .
@@ -25,7 +24,3 @@ services:
 
   whoami:
     image: traefik/whoami
-
-volumes:
-  caddy_data:
-  caddy_config:

@@ -1,0 +1,18 @@
+{
+    servers {
+        trusted_proxies static private_ranges
+    }
+}
+
+http://:3000 {
+    route {
+        turnstile {
+            site_key {env.TURNSTILE_SITE_KEY}
+            secret_key {env.TURNSTILE_SECRET_KEY}
+            clearance_key {env.BP_CLEARANCE_KEY}
+            clearance_ttl 30d
+        }
+        # A cleared request should be routed to the application by nginx.
+        respond 403
+    }
+}

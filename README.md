@@ -80,6 +80,39 @@ The front proxy and the filter must agree on a few things:
 The filter receives each request's original `Host`, so one instance can
 serve multiple sites. The operational requirements below also apply.
 
+### Route cleared requests directly from nginx
+
+For sites where nginx should handle application routing, the front proxy can
+validate the filter's stateless HMAC-SHA256 clearance cookie and send cleared
+requests straight to the application. Only requests without valid clearance
+go to Caddy for the Turnstile challenge and verification POST:
+
+```text
+client → nginx ── valid clearance ──→ application
+              └── otherwise ───────→ Caddy (Turnstile)
+```
+
+The example consists of [nginx configuration](examples/proxy/advanced.nginx.conf),
+an [njs cookie validator](examples/proxy/advanced-clearance.js) and a
+[challenge-only Caddyfile](examples/proxy/advanced.filter.Caddyfile).
+Install nginx's HTTP [njs module](https://nginx.org/en/docs/njs/install.html),
+load the nginx configuration as the main `nginx.conf`, and place the
+validator at `/etc/nginx/advanced-clearance.js`. Set the same
+`BP_CLEARANCE_KEY` (at least 32 bytes) and `TURNSTILE_SITE_KEY` in
+both processes; only Caddy needs `TURNSTILE_SECRET_KEY`. Replace the
+hostname, TLS certificate paths and upstream addresses for your deployment.
+Keep both upstreams inaccessible to untrusted clients.
+
+The example matches the plugin's default `bp_clearance` cookie prefix
+and a 30-day TTL. Its validator checks the derived cookie name, signature,
+hostname and issue time; simply checking cookie presence is insufficient.
+If you change the cookie format, prefix, site key or TTL, update the validator
+to match. The shared clearance key is distinct from the Turnstile API secret.
+
+**nginx now owns policy selection.** Put any IP blocks, trusted-client bypasses
+and path exclusions in nginx before its clearance check. Caddy cannot enforce
+those policies on requests that nginx sends directly to the application.
+
 ## Operational requirements
 
 **Protect challenge responses and verification requests.**

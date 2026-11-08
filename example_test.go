@@ -13,7 +13,11 @@ func TestExamplesAdapt(t *testing.T) {
 	t.Setenv("TRUSTED_PROXIES", "127.0.0.1/32")
 	t.Setenv("BIND", "127.0.0.1:3000")
 	t.Setenv("TARGET", "127.0.0.1:8080")
-	for _, name := range []string{"examples/turnstile.Caddyfile", "examples/proxy/filter.Caddyfile"} {
+	for _, name := range []string{
+		"examples/turnstile.Caddyfile",
+		"examples/proxy/filter.Caddyfile",
+		"examples/proxy/advanced.filter.Caddyfile",
+	} {
 		t.Run(name, func(t *testing.T) {
 			data, err := os.ReadFile(name)
 			if err != nil {

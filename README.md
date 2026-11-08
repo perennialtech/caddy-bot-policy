@@ -73,6 +73,40 @@ ASN lookups. Lookups use Caddy's resolved client IP (respecting
 `trusted_proxies`), not forwarding headers. Unknown or unmapped IPs
 have no ASN match; ASN rules require a readable database at startup.
 
+## Run as a separate proxy
+
+To keep your existing reverse proxy for TLS and routing, run Caddy with
+this plugin as its own tier between that proxy and your backend:
+
+```
+client → front proxy (TLS, routing) → Caddy with bot_policy/turnstile → backend
+```
+
+[examples/proxy](examples/proxy) runs this with Docker Compose:
+`docker compose up --build` in that directory, then open
+`https://localhost`. It builds the plugin into Caddy's image, and uses
+Cloudflare's testing keys unless you set `TURNSTILE_SITE_KEY` and
+`TURNSTILE_SECRET_KEY`. The filter takes its listen address, upstream and
+trusted proxies from `BIND`, `TARGET` and `TRUSTED_PROXIES`.
+
+The front proxy and the filter must agree on a few things:
+
+- Set `trusted_proxies` on the filter to the front proxy's addresses.
+  Otherwise IP and ASN rules and Turnstile's `remoteip` see the front
+  proxy's address instead of the client's, and nothing reports it.
+- Send the client address from the front proxy in `X-Forwarded-For`, or
+  name another header with the filter's `client_ip_headers`, such as
+  `X-Real-IP` from nginx.
+- Pass the original `Host` header. Turnstile checks it against the
+  hostname the challenge was solved on. Caddy and Traefik do this by
+  default; nginx needs `proxy_set_header Host $host`.
+- Leave `allow_insecure_cookie` off. The filter receives plain HTTP, but
+  visitors use HTTPS, so the clearance cookie must stay `Secure`.
+
+The filter sees each request's original `Host`, so one instance can
+serve several sites. The operational requirements below apply to this
+setup too.
+
 ## Operational requirements
 
 **Protect challenge responses and verification requests.**

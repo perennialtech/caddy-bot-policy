@@ -1,0 +1,31 @@
+services:
+  caddy:
+    image: caddy:2.11.9
+    ports:
+      - 80:80
+      - 443:443
+      - 443:443/udp
+    volumes:
+      - ./front.Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+  filter:
+    build: .
+    environment:
+      BIND: ":3000"
+      TARGET: http://whoami:80
+      TRUSTED_PROXIES: private_ranges
+      # Cloudflare's public testing keys, which pass every visitor.
+      # Supply your own for a real site.
+      TURNSTILE_SITE_KEY: ${TURNSTILE_SITE_KEY:-1x00000000000000000000AA}
+      TURNSTILE_SECRET_KEY: ${TURNSTILE_SECRET_KEY:-1x0000000000000000000000000000000AA}
+    volumes:
+      - ./filter.Caddyfile:/etc/caddy/Caddyfile:ro
+
+  whoami:
+    image: traefik/whoami
+
+volumes:
+  caddy_data:
+  caddy_config:

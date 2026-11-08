@@ -48,13 +48,13 @@ For `asn:13335` entries in either list, obtain a local MaxMind
 [GeoLite2 ASN database](https://dev.maxmind.com/geoip/geolite2-free-geolocation-data/)
 or [DB-IP ASN Lite database](https://db-ip.com/db/download/ip-to-asn-lite),
 and set `asn_db /path/to/asn.mmdb` inside `bot_policy`. GeoIP2 ASN
-databases also work. Refresh the file and run
-`caddy reload --force --config /path/to/Caddyfile` (or restart Caddy)
-to update the mapping. An ordinary reload of unchanged config is skipped.
-Requests never perform external ASN lookups. Lookups use Caddy's
-resolved client IP (respecting `trusted_proxies`), not forwarding
-headers. Unknown or unmapped IPs have no ASN match; ASN rules require a
-readable database at startup.
+databases also work. Replace the file atomically (write a temporary
+file, then rename it into place); Caddy picks up changes within a minute
+without a configuration reload. If a refresh fails, the last valid
+database remains in use. Requests never perform external ASN lookups.
+Lookups use Caddy's resolved client IP (respecting `trusted_proxies`),
+not forwarding headers. Unknown or unmapped IPs have no ASN match;
+ASN rules require a readable database at startup.
 
 ## Operational requirements
 

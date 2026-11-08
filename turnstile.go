@@ -91,6 +91,10 @@ const (
 // It is a bearer credential: anyone presenting the cookie is treated
 // as having solved the challenge.
 //
+// Handlers on the same hostname share clearances when their signing key,
+// site_key and cookie_name match, regardless of route, path or port. Each
+// receiving handler applies its own clearance_ttl to the issue time.
+//
 //	turnstile {
 //		site_key         {env.TURNSTILE_SITE_KEY}
 //		secret_key       {env.TURNSTILE_SECRET_KEY}
@@ -107,16 +111,19 @@ type Turnstile struct {
 
 	// ClearanceKey signs the clearance cookie. Optional: by default a key is
 	// derived from SecretKey, which means rotating the Turnstile secret
-	// also invalidates every clearance. If set it must be at least 32
-	// bytes. Placeholders are expanded at provision time.
+	// also invalidates every clearance. An explicit key preserves clearances
+	// across secret_key rotation. If set it must be at least 32 bytes.
+	// Placeholders are expanded at provision time.
 	ClearanceKey string `json:"clearance_key,omitempty"`
 
 	// ClearanceTTL is how long a clearance stays valid after it is issued.
-	// Defaults to 30 days; must be between one minute and 400 days.
+	// Each handler checks its current TTL, so shortening it takes effect
+	// immediately. Defaults to 30 days; must be between one minute and 400 days.
 	ClearanceTTL caddy.Duration `json:"clearance_ttl,omitempty"`
 
 	// CookieName is the prefix of the clearance cookie name. The final name
-	// also carries a stable, keyed namespace for this configuration.
+	// also carries a stable, keyed namespace for this configuration. The
+	// prefix is part of the signed identity, not just a cosmetic cookie name.
 	CookieName string `json:"cookie_name,omitempty"`
 
 	// MaxPendingVerifications caps how many siteverify calls this handler

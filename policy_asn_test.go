@@ -68,11 +68,6 @@ func parseASNPolicy(t *testing.T, db, rules string) *BotPolicy {
 	if err := bp.Provision(caddy.Context{}); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		if err := bp.Cleanup(); err != nil {
-			t.Error(err)
-		}
-	})
 	return &bp
 }
 
@@ -176,15 +171,35 @@ func TestASNBlacklistOverridesTurnstileClearance(t *testing.T) {
 
 func TestASNPolicyRejectsUnverifiedClientIP(t *testing.T) {
 	db := testASNDatabase(t, "GeoLite2-ASN")
-	bp := parseASNPolicy(t, db, "whitelist asn:13335")
-	req := newTurnstileRequest(http.MethodGet, "https://"+testHost+"/", "", nil)
-	caddyhttp.SetVar(req.Context(), caddyhttp.ClientIPVarKey, "203.0.113.7")
-	// An early-data request cannot establish the source address securely.
-	req.TLS.HandshakeComplete = false
-	err := bp.ServeHTTP(httptest.NewRecorder(), req, passThrough)
-	var httpErr caddyhttp.HandlerError
-	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusTooEarly {
-		t.Fatalf("unverified source: got %v, want HTTP 425", err)
+	for _, tt := range []struct {
+		name, rules, fingerprint, agent string
+		status                          int
+	}{
+		{"ASN-only whitelist needs verified IP", "whitelist asn:13335", "", "", 425},
+		{"UA whitelist can bypass without ASN blacklist", "whitelist asn:13335 ua:GoodBot", "", "GoodBot", 200},
+		{"JA4 whitelist can bypass without ASN blacklist", "whitelist asn:13335 " + testFP, testFP, "", 200},
+		{"ASN blacklist prevents premature UA bypass", "blacklist asn:13335\nwhitelist ua:GoodBot", "", "GoodBot", 425},
+		{"UA blacklist still blocks", "blacklist asn:13335 ua:BadBot", "", "BadBot", 403},
+		{"JA4 blacklist still blocks", "blacklist asn:13335 " + testFP, testFP, "", 403},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			bp := parseASNPolicy(t, db, tt.rules)
+			req := newTurnstileRequest(http.MethodGet, "https://"+testHost+"/", tt.fingerprint, nil)
+			req.Header.Set("User-Agent", tt.agent)
+			caddyhttp.SetVar(req.Context(), caddyhttp.ClientIPVarKey, "203.0.113.7")
+			// An early-data request cannot establish its source IP securely.
+			req.TLS.HandshakeComplete = false
+			rec := httptest.NewRecorder()
+			err := bp.ServeHTTP(rec, req, passThrough)
+			if tt.status == 425 {
+				var httpErr caddyhttp.HandlerError
+				if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusTooEarly {
+					t.Fatalf("got %v, want HTTP 425", err)
+				}
+			} else if err != nil || rec.Code != tt.status {
+				t.Fatalf("got status %d, error %v, want %d", rec.Code, err, tt.status)
+			}
+		})
 	}
 }
 

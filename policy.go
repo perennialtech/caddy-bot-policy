@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/netip"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -179,23 +180,20 @@ func (bp *BotPolicy) Provision(ctx caddy.Context) error {
 		if bp.ASNDB == "" {
 			return fmt.Errorf("bot_policy: asn_db is required for ASN rules")
 		}
-		reader, err := maxminddb.Open(bp.ASNDB)
+		data, err := os.ReadFile(bp.ASNDB)
+		if err != nil {
+			return fmt.Errorf("bot_policy: read asn_db %q: %w", bp.ASNDB, err)
+		}
+		// Keep the database in memory: Caddy may unload a config before
+		// in-flight requests on its old HTTP server finish.
+		reader, err := maxminddb.OpenBytes(data)
 		if err != nil {
 			return fmt.Errorf("bot_policy: open asn_db %q: %w", bp.ASNDB, err)
 		}
 		if reader.Metadata.DatabaseType != "GeoLite2-ASN" && reader.Metadata.DatabaseType != "GeoIP2-ASN" {
-			reader.Close()
 			return fmt.Errorf("bot_policy: asn_db %q is not a MaxMind ASN database", bp.ASNDB)
 		}
 		bp.asnReader = reader
-	}
-	return nil
-}
-
-// Cleanup releases the memory-mapped ASN database when Caddy unloads the module.
-func (bp *BotPolicy) Cleanup() error {
-	if bp.asnReader != nil {
-		return bp.asnReader.Close()
 	}
 	return nil
 }
@@ -211,12 +209,12 @@ func (bp *BotPolicy) Validate() error {
 // ServeHTTP implements caddyhttp.MiddlewareHandler.
 func (bp *BotPolicy) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
 	fingerprint := trustedFingerprint(r, bp.VarName)
+	// In 0-RTT, the source IP is not yet verified. A known blacklist
+	// match can still block, and a non-IP whitelist can still bypass
+	// when there are no unresolved ASN blacklist rules.
+	early := bp.asnReader != nil && r.TLS != nil && !r.TLS.HandshakeComplete
 	var asn uint32
-	if bp.asnReader != nil {
-		// MatchClientIP likewise refuses an unverified 0-RTT source address.
-		if r.TLS != nil && !r.TLS.HandshakeComplete {
-			return caddyhttp.Error(http.StatusTooEarly, fmt.Errorf("TLS handshake not complete, client IP cannot be verified"))
-		}
+	if bp.asnReader != nil && !early {
 		ip, _ := caddyhttp.GetVar(r.Context(), caddyhttp.ClientIPVarKey).(string)
 		if addr, err := netip.ParseAddr(ip); err == nil {
 			result := bp.asnReader.Lookup(addr.Unmap())
@@ -241,6 +239,9 @@ func (bp *BotPolicy) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 	if blacklisted {
 		return bp.block(w, r, fingerprint)
 	}
+	if early && len(bp.blacklist.asns) > 0 {
+		return caddyhttp.Error(http.StatusTooEarly, fmt.Errorf("TLS handshake not complete, client IP cannot be verified"))
+	}
 	whitelisted, err := bp.whitelist.match(r, fingerprint, asn)
 	if err != nil {
 		return err
@@ -248,6 +249,9 @@ func (bp *BotPolicy) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 	if whitelisted {
 		r = r.WithContext(context.WithValue(r.Context(), policyWhitelistKey{}, true))
 		return next.ServeHTTP(w, r)
+	}
+	if early {
+		return caddyhttp.Error(http.StatusTooEarly, fmt.Errorf("TLS handshake not complete, client IP cannot be verified"))
 	}
 	if fingerprint == "" && bp.OnMissingFingerprint == "closed" {
 		return bp.block(w, r, fingerprint)
@@ -288,7 +292,6 @@ func newBlockID(prefix string) string {
 // Interface guards.
 var (
 	_ caddy.Provisioner           = (*BotPolicy)(nil)
-	_ caddy.CleanerUpper          = (*BotPolicy)(nil)
 	_ caddy.Validator             = (*BotPolicy)(nil)
 	_ caddyhttp.MiddlewareHandler = (*BotPolicy)(nil)
 )

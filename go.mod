@@ -159,5 +159,3 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	howett.net/plist v1.0.1 // indirect
 )
-
-replace github.com/caddyserver/caddy/v2 => github.com/perennialtech/caddy/v2 v2.0.0-20261108000201-965f5962f33a

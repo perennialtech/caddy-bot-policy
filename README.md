@@ -1,8 +1,8 @@
 # caddy-bot-policy
 
 A [Caddy](https://caddyserver.com) module for observing JA4 TLS client
-fingerprints, whitelisting and blacklisting JA4 identifiers, client IPs and
-User-Agent patterns, and issuing
+fingerprints, whitelisting and blacklisting JA4 identifiers, client IPs,
+User-Agent patterns and ASNs, and issuing
 [Cloudflare Turnstile](https://developers.cloudflare.com/turnstile/)
 challenge clearances.
 
@@ -39,8 +39,9 @@ fingerprint.
 - `ja4` publishes the spec-exact `{http.vars.ja4}` for logs and
   blocklists, and the resumption-insensitive `{http.vars.ja4_bind}` for
   clearance binding.
-- `bot_policy` accepts JA4 identifiers, IP addresses, CIDRs and `ua:`-prefixed
-  Go regular expressions (RE2) in its `whitelist` and `blacklist` lists.
+- `bot_policy` accepts JA4 identifiers, IP addresses, CIDRs,
+  `ua:`-prefixed Go regular expressions (RE2), and `asn:`-prefixed AS
+  numbers in its `whitelist` and `blacklist` lists.
   For example, `blacklist "ua:(?i)badbot"` matches `BadBot/1.0`.
   User-Agent patterns match substrings and are case-sensitive unless they use
   `(?i)`; use `^` and `$` for a full-string match. Missing or empty User-Agent
@@ -78,6 +79,17 @@ order is explicit. Path-scoped Turnstile policies therefore match the
 original requested URL; protect any public rewrite aliases as well.
 For method-restricted matchers, include both GET and POST. Use matchers
 to exclude webhook, API and preflight paths rather than challenging them.
+
+For `asn:13335` entries in either list, obtain a local MaxMind
+[GeoLite2 ASN database](https://dev.maxmind.com/geoip/geolite2-free-geolocation-data/)
+and set `asn_db /path/to/GeoLite2-ASN.mmdb` inside `bot_policy`. GeoIP2
+ASN databases also work. Refresh the database file and reload Caddy to
+update the mapping; requests never perform external ASN lookups. Lookup
+uses Caddy's resolved client IP (respecting `trusted_proxies`), not
+untrusted forwarding headers. Unknown or unmapped IPs have no ASN match,
+and all other policy types still apply. If an ASN rule is configured
+without a readable ASN database, Caddy rejects the configuration at
+startup. An unreadable record at request time has no ASN match.
 
 ## Operational requirements
 

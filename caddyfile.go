@@ -13,7 +13,9 @@ import (
 //
 //	bot_policy {
 //		var_name               ja4
+//		asn_db                 /var/lib/geoip/GeoLite2-ASN.mmdb
 //		whitelist              192.0.2.10 2001:db8:1::/48 "ua:(?i)googlebot"
+//		whitelist              asn:13335
 //		blacklist              t13d1517h2_8daaf6152771_b6f405a00624
 //		blacklist              198.51.100.0/24 q13d0312h3_55b375c5d22e_cd8dafe46ac5
 //		on_missing_fingerprint open
@@ -35,6 +37,15 @@ func (bp *BotPolicy) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 		}
 		for d.NextBlock(0) {
 			switch d.Val() {
+			case "asn_db":
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
+				bp.ASNDB = d.Val()
+				if d.NextArg() {
+					return d.ArgErr()
+				}
+
 			case "var_name":
 				if !d.NextArg() {
 					return d.ArgErr()

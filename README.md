@@ -59,7 +59,9 @@ by default unless `log_credentials` is enabled. Use Caddy's log filtering for
 custom credentials, or send a secret through `Authorization` instead. These
 headers are also forwarded to the upstream unless removed: place
 `request_header -X-Monitor-Token` after the matching decision and before
-`reverse_proxy`, as in the example. Never use User-Agent matching as
+`reverse_proxy` **in every upstream route**, as in the example: an otherwise
+trusted IP or User-Agent may still send the monitor token. Never use
+User-Agent matching as
 authentication; the client controls it.
 
 The `turnstile` handler still serves challenges until the client presents a

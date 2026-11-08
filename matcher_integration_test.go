@@ -2,6 +2,7 @@ package botpolicy
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -138,5 +139,41 @@ func TestASNMatcherNegationInEarlyData(t *testing.T) {
 	matched, err := not.MatchWithError(req)
 	if matched || err == nil {
 		t.Fatalf("unsafe early-data negation: match %v, error %v", matched, err)
+	}
+}
+
+func TestIntegrationSecretRemovedAfterMatching(t *testing.T) {
+	t.Setenv("MONITOR_TOKEN", "monitor-secret")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Monitor-Token") != "" {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+	for _, trustedIP := range []string{"127.0.0.1", "192.0.2.7"} {
+		t.Run(trustedIP, func(t *testing.T) {
+			base := startCaddy(t, `
+                @trustedIP client_ip `+trustedIP+`
+                @monitor secret_header X-Monitor-Token {env.MONITOR_TOKEN}
+                route {
+                    handle @trustedIP {
+                        request_header -X-Monitor-Token
+                        reverse_proxy `+upstream.URL+`
+                    }
+                    handle @monitor {
+                        request_header -X-Monitor-Token
+                        reverse_proxy `+upstream.URL+`
+                    }
+                }
+            `)
+			req, _ := http.NewRequest(http.MethodGet, base+"/", nil)
+			req.Header.Set("X-Monitor-Token", "monitor-secret")
+			resp, body := newVisitor(t, base).do(req)
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("token leaked upstream: status %d body %q", resp.StatusCode, body)
+			}
+		})
 	}
 }

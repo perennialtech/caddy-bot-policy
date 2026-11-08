@@ -21,12 +21,15 @@ example.com {
 
         # Each handle is a separate whitelist alternative (logical OR).
         handle @trustedIP {
+            request_header -X-Monitor-Token
             reverse_proxy localhost:8080
         }
         handle @trustedUA {
+            request_header -X-Monitor-Token
             reverse_proxy localhost:8080
         }
         handle @trustedASN {
+            request_header -X-Monitor-Token
             reverse_proxy localhost:8080
         }
         handle @monitor {
@@ -38,6 +41,7 @@ example.com {
                 site_key {env.TURNSTILE_SITE_KEY}
                 secret_key {env.TURNSTILE_SECRET_KEY}
             }
+            request_header -X-Monitor-Token
             reverse_proxy localhost:8080
         }
     }

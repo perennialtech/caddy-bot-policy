@@ -7,16 +7,17 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"strings"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"go.uber.org/zap"
 )
 
-// BotPolicy applies whitelists and blacklists to client IP addresses and
-// TLS client fingerprints (JA4). Fingerprints come from the ja4 handler,
-// which needs the ja4 listener or packet conn wrapper to have captured the
-// ClientHello.
+// BotPolicy applies whitelists and blacklists to client IP addresses,
+// TLS client fingerprints (JA4), and User-Agent headers. Fingerprints come
+// from the ja4 handler, which needs the ja4 listener or packet conn wrapper
+// to have captured the ClientHello.
 type BotPolicy struct {
 	// VarName names the fingerprint to match: the ja4 handler's var_name or
 	// bind_var_name. It is read from the ja4 handler directly, not from the
@@ -24,7 +25,8 @@ type BotPolicy struct {
 	// "ja4".
 	VarName string `json:"var_name,omitempty"`
 
-	// Whitelist contains JA4 identifiers, IPv4/IPv6 addresses and CIDRs.
+	// Whitelist contains JA4 identifiers, IPv4/IPv6 addresses and CIDRs,
+	// and ua:-prefixed Go regular expressions for User-Agent headers.
 	// Any match bypasses on_missing_fingerprint closed and downstream
 	// Turnstile challenges, unless Blacklist also matches.
 	// IP matching uses Caddy's resolved client IP, respecting trusted_proxies.
@@ -40,7 +42,8 @@ type BotPolicy struct {
 	// OnMissingFingerprint is "open" (let the request through when the ja4
 	// handler published no fingerprint under var_name) or "closed" (block
 	// it). Defaults to "open". IP blacklist and whitelist matches are
-	// evaluated first, even when the fingerprint is missing.
+	// evaluated first, even when the fingerprint is missing. User-Agent
+	// matches are also evaluated before the missing-fingerprint policy.
 	OnMissingFingerprint string `json:"on_missing_fingerprint,omitempty"`
 
 	// Action is the response taken when a request is blocked. Only
@@ -60,6 +63,7 @@ type policyWhitelistKey struct{}
 type policyList struct {
 	fingerprints map[string]bool
 	ips          caddyhttp.MatchClientIP
+	userAgents   []*regexp.Regexp
 }
 
 // Matches the fixed-width identifiers produced by clientHello.ja4,
@@ -69,8 +73,18 @@ var ja4Identifier = regexp.MustCompile(`^[tq]([0-9]{2}|s[123])[di][0-9]{4}[a-zA-
 func (list *policyList) provision(ctx caddy.Context, entries []string) error {
 	list.fingerprints = make(map[string]bool)
 	list.ips = caddyhttp.MatchClientIP{}
+	list.userAgents = nil
 	for _, entry := range entries {
-		if ja4Identifier.MatchString(entry) {
+		if pattern, ok := strings.CutPrefix(entry, "ua:"); ok {
+			if pattern == "" {
+				return fmt.Errorf("empty User-Agent pattern %q", entry)
+			}
+			re, err := regexp.Compile(pattern)
+			if err != nil {
+				return fmt.Errorf("invalid User-Agent pattern %q: %w", entry, err)
+			}
+			list.userAgents = append(list.userAgents, re)
+		} else if ja4Identifier.MatchString(entry) {
 			list.fingerprints[entry] = true
 		} else {
 			list.ips.Ranges = append(list.ips.Ranges, entry)
@@ -82,6 +96,13 @@ func (list *policyList) provision(ctx caddy.Context, entries []string) error {
 func (list policyList) match(r *http.Request, fingerprint string) (bool, error) {
 	if list.fingerprints[fingerprint] {
 		return true, nil
+	}
+	if userAgent := r.Header.Get("User-Agent"); userAgent != "" {
+		for _, re := range list.userAgents {
+			if re.MatchString(userAgent) {
+				return true, nil
+			}
+		}
 	}
 	if len(list.ips.Ranges) == 0 {
 		return false, nil

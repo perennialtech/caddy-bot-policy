@@ -42,8 +42,9 @@ type maxMindCredentials struct {
 }
 
 type maxMindUser struct {
-	owner *BotPolicy
-	creds maxMindCredentials
+	owner  *BotPolicy
+	creds  maxMindCredentials
+	logger *zap.Logger
 }
 
 // managedASNDB is shared by config generations that use the same cache path.
@@ -52,7 +53,7 @@ type managedASNDB struct {
 	path     string
 	url      string
 	client   *http.Client
-	logger   *zap.Logger
+	logger   atomic.Pointer[zap.Logger]
 	reader   atomic.Pointer[maxminddb.Reader]
 	creds    atomic.Value // maxMindCredentials
 	usersMu  sync.Mutex
@@ -75,11 +76,11 @@ func acquireMaxMindDB(path string, owner *BotPolicy, cfg MaxMindASN, logger *zap
 			path:   path,
 			url:    maxMindDownloadURL,
 			client: &http.Client{Timeout: time.Minute},
-			logger: logger,
 			ctx:    ctx,
 			cancel: cancel,
 			done:   make(chan struct{}),
 		}
+		db.logger.Store(logger)
 		db.creds.Store(maxMindCredentials{cfg.AccountID, cfg.LicenseKey})
 		if err := db.loadCache(); err != nil {
 			// A corrupt cache cannot be served, so recover by downloading.
@@ -95,16 +96,17 @@ func acquireMaxMindDB(path string, owner *BotPolicy, cfg MaxMindASN, logger *zap
 		return nil, err
 	}
 	db := value.(*managedASNDB)
-	db.addUser(owner, cfg)
+	db.addUser(owner, cfg, logger)
 	return db, nil
 }
 
-func (db *managedASNDB) addUser(owner *BotPolicy, cfg MaxMindASN) {
+func (db *managedASNDB) addUser(owner *BotPolicy, cfg MaxMindASN, logger *zap.Logger) {
 	db.usersMu.Lock()
 	defer db.usersMu.Unlock()
 	credentials := maxMindCredentials{cfg.AccountID, cfg.LicenseKey}
-	db.users = append(db.users, maxMindUser{owner: owner, creds: credentials})
+	db.users = append(db.users, maxMindUser{owner: owner, creds: credentials, logger: logger})
 	db.creds.Store(credentials)
+	db.logger.Store(logger)
 }
 
 func (db *managedASNDB) removeUser(owner *BotPolicy) {
@@ -119,6 +121,7 @@ func (db *managedASNDB) removeUser(owner *BotPolicy) {
 	// Rejected reloads must not leave the active config using their keys.
 	if n := len(db.users); n > 0 {
 		db.creds.Store(db.users[n-1].creds)
+		db.logger.Store(db.users[n-1].logger)
 	}
 }
 
@@ -155,7 +158,7 @@ func (db *managedASNDB) run() {
 	defer close(db.done)
 	// Startup with an existing cache never blocks on the network.
 	if err := db.refresh(db.ctx); err != nil && db.ctx.Err() == nil {
-		db.logger.Error("MaxMind ASN refresh failed", zap.Error(err))
+		db.logger.Load().Error("MaxMind ASN refresh failed", zap.Error(err))
 	}
 	ticker := time.NewTicker(maxMindRefreshInterval)
 	defer ticker.Stop()
@@ -165,7 +168,7 @@ func (db *managedASNDB) run() {
 			return
 		case <-ticker.C:
 			if err := db.refresh(db.ctx); err != nil && db.ctx.Err() == nil {
-				db.logger.Error("MaxMind ASN refresh failed", zap.Error(err))
+				db.logger.Load().Error("MaxMind ASN refresh failed", zap.Error(err))
 			}
 		}
 	}
@@ -276,7 +279,7 @@ func (db *managedASNDB) download(ctx context.Context, modified time.Time) error 
 	// request may still be using it after this atomic pointer swap.
 	db.reader.Store(reader)
 	db.modified = modified
-	db.logger.Info("MaxMind ASN database updated", zap.String("path", db.path))
+	db.logger.Load().Info("MaxMind ASN database updated", zap.String("path", db.path))
 	return nil
 }
 

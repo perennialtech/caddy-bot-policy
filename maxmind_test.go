@@ -21,7 +21,26 @@ import (
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/maxmind/mmdbwriter"
 	"github.com/maxmind/mmdbwriter/mmdbtype"
+	"go.uber.org/zap"
 )
+
+func TestMaxMindLoggerFollowsActiveConfig(t *testing.T) {
+	db := new(managedASNDB)
+	a, b := new(BotPolicy), new(BotPolicy)
+	first, second := zap.NewNop(), zap.NewNop()
+	db.addUser(a, MaxMindASN{AccountID: "first"}, first)
+	db.addUser(b, MaxMindASN{AccountID: "second"}, second)
+	if db.logger.Load() != second {
+		t.Fatal("new config did not supply the refresher logger")
+	}
+	db.removeUser(b)
+	if db.logger.Load() != first {
+		t.Fatal("rejected config left its logger on the active refresher")
+	}
+	if got := db.creds.Load().(maxMindCredentials).accountID; got != "first" {
+		t.Fatalf("rejected config left credentials for %q", got)
+	}
+}
 
 type maxMindFixture struct {
 	mu       sync.Mutex

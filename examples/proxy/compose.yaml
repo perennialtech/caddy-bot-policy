@@ -3,6 +3,8 @@ services:
     build:
       context: .
       dockerfile: front.Dockerfile
+    depends_on:
+      - filter
     ports:
       - 80:80
       - 443:443

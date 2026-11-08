@@ -246,8 +246,28 @@ func TestMaxMindCacheReuseAndConfigGenerations(t *testing.T) {
 	if refs, ok := maxMindDatabases.References(maxMindCachePath()); !ok || refs != 2 {
 		t.Fatalf("expected 2 pool references, got %d (ok: %v)", refs, ok)
 	}
+	// A failed Caddy reload provisions a new handler and then cleans it up.
+	// Its credentials must not remain on the still-running refresher.
+	rejected := &BotPolicy{
+		Blacklist: []string{"asn:13335"},
+		MaxMind:   &MaxMindASN{AccountID: "12345", LicenseKey: "rejected-key"},
+	}
+	if err := rejected.Provision(caddy.Context{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := rejected.Cleanup(); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.managed.refresh(context.Background()); err != nil {
+		t.Fatalf("rejected config left invalid credentials active: %v", err)
+	}
 	if err := a.Cleanup(); err != nil {
 		t.Fatal(err)
+	}
+	// Cleanup may overlap HTTP requests from the retired config. Those
+	// requests must still see the in-memory reader they were using.
+	if code := managedResponse(t, a); code != http.StatusForbidden {
+		t.Fatalf("retired config lost its ASN reader: HTTP %d", code)
 	}
 	if refs, ok := maxMindDatabases.References(maxMindCachePath()); !ok || refs != 1 {
 		t.Fatalf("expected 1 pool reference, got %d (ok: %v)", refs, ok)

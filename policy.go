@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
@@ -47,6 +48,7 @@ type BotPolicy struct {
 	blacklist policyList
 	asnReader *maxminddb.Reader
 	managed   *managedASNDB
+	cleaned   *atomic.Bool
 	logger    *zap.Logger
 }
 
@@ -151,10 +153,11 @@ func (bp *BotPolicy) Provision(ctx caddy.Context) error {
 				return fmt.Errorf("bot_policy: maxmind account_id and license_key are required")
 			}
 			var err error
-			bp.managed, err = acquireMaxMindDB(maxMindCachePath(), cfg, bp.logger)
+			bp.managed, err = acquireMaxMindDB(maxMindCachePath(), bp, cfg, bp.logger)
 			if err != nil {
 				return fmt.Errorf("bot_policy: %w", err)
 			}
+			bp.cleaned = new(atomic.Bool)
 		} else {
 			if bp.ASNDB == "" {
 				return fmt.Errorf("bot_policy: asn_db is required for ASN rules")
@@ -176,11 +179,11 @@ func (bp *BotPolicy) Provision(ctx caddy.Context) error {
 
 // Cleanup releases this config's use of the shared MaxMind refresher.
 func (bp *BotPolicy) Cleanup() error {
-	if bp.managed == nil {
+	if bp.managed == nil || !bp.cleaned.CompareAndSwap(false, true) {
 		return nil
 	}
+	bp.managed.removeUser(bp)
 	_, err := maxMindDatabases.Delete(bp.managed.path)
-	bp.managed = nil
 	return err
 }
 

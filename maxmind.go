@@ -41,6 +41,11 @@ type maxMindCredentials struct {
 	licenseKey string
 }
 
+type maxMindUser struct {
+	owner *BotPolicy
+	creds maxMindCredentials
+}
+
 // managedASNDB is shared by config generations that use the same cache path.
 // A request loads the current reader once so it stays valid across updates.
 type managedASNDB struct {
@@ -50,7 +55,9 @@ type managedASNDB struct {
 	logger   *zap.Logger
 	reader   atomic.Pointer[maxminddb.Reader]
 	creds    atomic.Value // maxMindCredentials
-	mu       sync.Mutex   // serializes refreshes and protects modified
+	usersMu  sync.Mutex
+	users    []maxMindUser
+	mu       sync.Mutex // serializes refreshes and protects modified
 	modified time.Time
 	ctx      context.Context
 	cancel   context.CancelFunc
@@ -61,7 +68,7 @@ func maxMindCachePath() string {
 	return filepath.Join(caddy.AppDataDir(), "bot_policy", "GeoLite2-ASN.mmdb")
 }
 
-func acquireMaxMindDB(path string, cfg MaxMindASN, logger *zap.Logger) (*managedASNDB, error) {
+func acquireMaxMindDB(path string, owner *BotPolicy, cfg MaxMindASN, logger *zap.Logger) (*managedASNDB, error) {
 	value, _, err := maxMindDatabases.LoadOrNew(path, func() (caddy.Destructor, error) {
 		ctx, cancel := context.WithCancel(context.Background())
 		db := &managedASNDB{
@@ -88,9 +95,31 @@ func acquireMaxMindDB(path string, cfg MaxMindASN, logger *zap.Logger) (*managed
 		return nil, err
 	}
 	db := value.(*managedASNDB)
-	// A config reload may rotate credentials while reusing its cached reader.
-	db.creds.Store(maxMindCredentials{cfg.AccountID, cfg.LicenseKey})
+	db.addUser(owner, cfg)
 	return db, nil
+}
+
+func (db *managedASNDB) addUser(owner *BotPolicy, cfg MaxMindASN) {
+	db.usersMu.Lock()
+	defer db.usersMu.Unlock()
+	credentials := maxMindCredentials{cfg.AccountID, cfg.LicenseKey}
+	db.users = append(db.users, maxMindUser{owner: owner, creds: credentials})
+	db.creds.Store(credentials)
+}
+
+func (db *managedASNDB) removeUser(owner *BotPolicy) {
+	db.usersMu.Lock()
+	defer db.usersMu.Unlock()
+	for i, user := range db.users {
+		if user.owner == owner {
+			db.users = append(db.users[:i], db.users[i+1:]...)
+			break
+		}
+	}
+	// Rejected reloads must not leave the active config using their keys.
+	if n := len(db.users); n > 0 {
+		db.creds.Store(db.users[n-1].creds)
+	}
 }
 
 func (db *managedASNDB) loadCache() error {

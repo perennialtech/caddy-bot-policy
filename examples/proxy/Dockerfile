@@ -1,7 +1,9 @@
-FROM caddy:2.11.9-builder AS builder
+FROM --platform=$BUILDPLATFORM caddy:2.11.9-builder AS builder
+ARG TARGETOS
+ARG TARGETARCH
 WORKDIR /src
 COPY go.mod go.sum *.go ./
-RUN xcaddy build --with github.com/perennialtech/caddy-bot-policy=.
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH xcaddy build --with github.com/perennialtech/caddy-bot-policy=.
 
 FROM caddy:2.11.9
 COPY --from=builder /src/caddy /usr/bin/caddy

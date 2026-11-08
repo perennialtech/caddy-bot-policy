@@ -46,8 +46,9 @@ exclude webhook, API and preflight paths rather than challenging them.
 
 For `asn:13335` entries in either list, obtain a local MaxMind
 [GeoLite2 ASN database](https://dev.maxmind.com/geoip/geolite2-free-geolocation-data/)
-and set `asn_db /path/to/GeoLite2-ASN.mmdb` inside `bot_policy`. GeoIP2
-ASN databases also work. Refresh the file and run
+or [DB-IP ASN Lite database](https://db-ip.com/db/download/ip-to-asn-lite),
+and set `asn_db /path/to/asn.mmdb` inside `bot_policy`. GeoIP2 ASN
+databases also work. Refresh the file and run
 `caddy reload --force --config /path/to/Caddyfile` (or restart Caddy)
 to update the mapping. An ordinary reload of unchanged config is skipped.
 Requests never perform external ASN lookups. Lookups use Caddy's

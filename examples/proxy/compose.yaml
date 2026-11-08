@@ -11,7 +11,9 @@ services:
       - caddy_config:/config
 
   filter:
-    image: ghcr.io/perennialtech/caddy-bot-policy:latest
+    build:
+      context: ../..
+      dockerfile: examples/proxy/Dockerfile
     environment:
       BIND: ":3000"
       TARGET: http://whoami:80

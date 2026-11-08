@@ -1,0 +1,11 @@
+example.com {
+    bot_policy {
+        whitelist 192.0.2.10 2001:db8:1::/48
+        blacklist 198.51.100.0/24 "ua:(?i)badbot"
+    }
+    turnstile {
+        site_key {env.TURNSTILE_SITE_KEY}
+        secret_key {env.TURNSTILE_SECRET_KEY}
+    }
+    reverse_proxy localhost:8080
+}

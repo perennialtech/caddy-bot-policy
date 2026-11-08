@@ -5,16 +5,12 @@ siteverify, using the public testing keys. Not run in CI: it needs Chromium
 and network access to challenges.cloudflare.com.
 
     pip install playwright && playwright install chromium
-    xcaddy build v2.11.9 --with github.com/perennialtech/caddy-bot-policy=../.. \
-        --replace github.com/caddyserver/caddy/v2=github.com/perennialtech/caddy/v2@v2.0.0-20261108000201-965f5962f33a
+    xcaddy build v2.11.9 --with github.com/perennialtech/caddy-bot-policy=../..
     ./caddy run --config Caddyfile &
     python3 run.py
 """
 
-import ssl
 import time
-import urllib.error
-import urllib.request
 
 from playwright.sync_api import sync_playwright
 
@@ -61,7 +57,7 @@ with sync_playwright() as p:
     check(not [m for m in console if "Content Security Policy" in m], "no CSP violations under a strict site policy")
 
     cookies = [c for c in ctx.cookies(PASS) if c["name"].startswith("bp_clearance")]
-    check(len(cookies) == 1 and cookies[0]["name"].startswith("bp_clearance_"), "one fingerprint-bound clearance cookie")
+    check(len(cookies) == 1 and cookies[0]["name"].startswith("bp_clearance_"), "one clearance cookie")
     c = cookies[0]
     check(c["httpOnly"] and c["secure"] and c["sameSite"] == "Lax", "cookie attributes")
     days = (c["expires"] - time.time()) / 86400
@@ -69,16 +65,6 @@ with sync_playwright() as p:
 
     r = page.goto(PASS + "/another")
     check(r.status == 200, "second visit goes straight through")
-
-    # Replay the bound cookie from Python's TLS stack: different JA4.
-    tls = ssl.create_default_context()
-    tls.check_hostname, tls.verify_mode = False, ssl.CERT_NONE
-    req = urllib.request.Request(PASS + "/another", headers={"Cookie": f"{c['name']}={c['value']}"})
-    try:
-        status = urllib.request.urlopen(req, context=tls).status
-    except urllib.error.HTTPError as e:
-        status = e.code
-    check(status == 403, f"bound cookie replayed from another TLS stack is refused ({status})")
 
     before_fail = clearance_jar(ctx, FAIL)
     check(bool(before_fail), "existing pass cookie is visible on failure origin (same hostname)")

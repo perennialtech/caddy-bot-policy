@@ -1,43 +1,5 @@
-// Package botpolicy implements JA4 TLS client fingerprinting for Caddy and a
-// policy handler with JA4, IP and User-Agent whitelists/blacklists, plus a
-// Cloudflare Turnstile challenge whose clearance can be bound to a fingerprint.
-//
-// It registers five modules:
-//
-//	caddy.listeners.ja4       listener wrapper that reads the ClientHello and
-//	                          computes the JA4 fingerprint
-//	caddy.packetconns.ja4     packet conn wrapper that does the same for each
-//	                          QUIC (HTTP/3) connection's handshake
-//	http.handlers.ja4         publishes that fingerprint as a request variable
-//	http.handlers.bot_policy  applies JA4, IP and User-Agent whitelists/blacklists
-//	http.handlers.turnstile   requires a Cloudflare Turnstile clearance
-//	                          cookie, serving a challenge page without one
-//
-// The split exists because a JA4 can only be computed before TLS is
-// terminated, while policy can only be applied once the request is parsed.
-// The ja4 handler records the observation in a package-private request
-// context value for policy enforcement and clearance binding. It also
-// exports request variables for log_append and request matchers; those
-// mutable variables are not trusted for enforcement.
-//
-// Minimal configuration:
-//
-//	{
-//		servers {
-//			listener_wrappers {
-//				ja4
-//				tls
-//			}
-//		}
-//	}
-//
-//	example.com {
-//		ja4
-//		bot_policy {
-//			blacklist t13d1516h2_8daaf6152771_e5627efa2ab1
-//		}
-//		reverse_proxy localhost:8080
-//	}
+// Package botpolicy provides Caddy policy matching for IP addresses,
+// User-Agent headers and ASNs, and Cloudflare Turnstile challenges.
 package botpolicy
 
 import (
@@ -45,36 +7,16 @@ import (
 	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
 )
 
-// defaultVarName names the fingerprint for publication and policy matching.
-const defaultVarName = "ja4"
-
 func init() {
-	caddy.RegisterModule(ListenerWrapper{})
-	caddy.RegisterModule(PacketConnWrapper{})
-	caddy.RegisterModule(Handler{})
 	caddy.RegisterModule(BotPolicy{})
 	caddy.RegisterModule(Turnstile{})
 
-	httpcaddyfile.RegisterHandlerDirective("ja4", parseJA4Caddyfile)
 	httpcaddyfile.RegisterHandlerDirective("bot_policy", parseCaddyfile)
 	httpcaddyfile.RegisterHandlerDirective("turnstile", parseTurnstileCaddyfile)
 
-	// Order matters here in two senses. bot_policy has to run after ja4 has
-	// published the fingerprint, and RegisterDirectiveOrder can only anchor
-	// against directives from Caddy's standard distribution — it panics on
-	// anything else, so "ja4 before bot_policy" is not expressible directly.
-	// Anchoring all three before redir, in this order, leaves the list as
-	// [... header, request_body, ja4, bot_policy, turnstile, redir, method,
-	// rewrite, uri, try_files ...]: the fingerprint is published first,
-	// blocklisted clients never get a challenge, and turnstile can bind its
-	// clearance to the fingerprint.
-	//
-	// Running ahead of redir, rewrite, uri and try_files means that matchers
-	// on these three directives see the URL the visitor actually requested. A path-scoped
-	// turnstile cannot be sidestepped by a rewrite that happens to move a
-	// protected URL elsewhere, and the challenge form, which posts back to
-	// the requested URL, reaches the same route as the request it answers.
-	httpcaddyfile.RegisterDirectiveOrder("ja4", httpcaddyfile.Before, "redir")
+	// Evaluate policy and challenge on the original request URI, before
+	// rewrite, redir, and try_files. Blocklisted clients cannot be cleared
+	// by Turnstile.
 	httpcaddyfile.RegisterDirectiveOrder("bot_policy", httpcaddyfile.Before, "redir")
 	httpcaddyfile.RegisterDirectiveOrder("turnstile", httpcaddyfile.Before, "redir")
 }

@@ -311,7 +311,7 @@ func TestIntegrationFailedVerificationRecovers(t *testing.T) {
 }
 
 // TestIntegrationDirectiveOrder pins down where the Caddyfile puts the
-// handlers: ja4, bot_policy, turnstile, in that order, and all of them
+// handlers: bot_policy and turnstile, in that order, and both
 // before anything that rewrites the URL.
 func TestIntegrationDirectiveOrder(t *testing.T) {
 	cfg := `example.com {
@@ -324,17 +324,16 @@ func TestIntegrationDirectiveOrder(t *testing.T) {
 		secret_key b
 	}
 	bot_policy {
-		blacklist x
+		blacklist 192.0.2.1
 	}
 	header X-Test 1
-	ja4
 }`
 	adapted, _, err := caddyfile.Adapter{ServerType: httpcaddyfile.ServerType{}}.Adapt([]byte(cfg), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	js := string(adapted)
-	order := []string{`"handler":"headers"`, `"handler":"ja4"`, `"handler":"bot_policy"`, `"handler":"turnstile"`, `"handler":"static_response"`, `"handler":"rewrite"`, `"handler":"file_server"`}
+	order := []string{`"handler":"headers"`, `"handler":"bot_policy"`, `"handler":"turnstile"`, `"handler":"static_response"`, `"handler":"rewrite"`, `"handler":"file_server"`}
 	last := -1
 	for _, h := range order {
 		i := strings.Index(js, h)
@@ -398,38 +397,8 @@ func TestIntegrationMethodMatchersForVerification(t *testing.T) {
 	}
 }
 
-// Operators using bind_fingerprint with HTTP/3 migration need an h1/h2-only
-// deployment option; verify the documented Caddy global protocols syntax.
-func TestIntegrationHTTP3DisabledConfig(t *testing.T) {
-	cfg := `{
-		servers {
-			protocols h1 h2
-			listener_wrappers {
-				ja4
-				tls
-			}
-		}
-	}
-	example.com {
-		ja4
-		turnstile {
-			site_key ` + testSiteKey + `
-			secret_key ` + testSecretKey + `
-			bind_fingerprint
-		}
-		respond "app"
-	}`
-	adapted, _, err := caddyfile.Adapter{ServerType: httpcaddyfile.ServerType{}}.Adapt([]byte(cfg), nil)
-	if err != nil {
-		t.Fatalf("h1/h2 fallback does not adapt: %v", err)
-	}
-	if !strings.Contains(string(adapted), `"protocols":["h1","h2"]`) {
-		t.Errorf("h1/h2 fallback did not disable h3: %s", adapted)
-	}
-}
-
 // A browser visits two separately configured, path-scoped Turnstile handlers
-// on the same hostname and keeps both cookies without any overwrites.
+// on the same hostname and keeps both cookies without overwrites.
 func TestIntegrationIndependentProtectedRoutes(t *testing.T) {
 	f := integrationFake(t)
 	base := startCaddy(t, `
@@ -468,80 +437,19 @@ func TestIntegrationIndependentProtectedRoutes(t *testing.T) {
 	}
 }
 
-// A Caddy vars directive is allowed to read arbitrary request headers, but it
-// cannot promote those bytes into a trusted JA4 when the TCP listener wrapper
-// has not observed a ClientHello. This is a real adapted Caddyfile, not a
-// direct handler-only test.
-func TestIntegrationSpoofedFingerprintFailsClosed(t *testing.T) {
-	f := integrationFake(t)
-	base := startCaddy(t, `
-        vars ja4 {http.request.header.X-Claimed-JA4}
-        vars ja4_bind {http.request.header.X-Claimed-JA4}
-        ja4
-        turnstile {
-            site_key `+testSiteKey+`
-            secret_key `+testSecretKey+`
-            bind_fingerprint
-            allow_insecure_cookie
-        }
-        respond "protected"
-    `)
-	v := newVisitor(t, base)
-	req, err := http.NewRequest(http.MethodPost, base+"/protected", strings.NewReader(solve("good").Encode()))
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("X-Claimed-JA4", "attacker-controlled-tls-profile")
-	resp, _ := v.do(req)
-	if resp.StatusCode != http.StatusForbidden || len(resp.Cookies()) > 0 || f.calls.Load() != 0 {
-		t.Fatalf("forged request var bypassed missing fingerprint: status=%d cookies=%v verify=%d",
-			resp.StatusCode, resp.Cookies(), f.calls.Load())
-	}
-}
-
-func TestIntegrationOnMissingFingerprintClosedRejectsSpoofedVar(t *testing.T) {
-	base := startCaddy(t, `
-        vars ja4 {http.request.header.X-Claimed-JA4}
-        ja4
-        bot_policy {
-            blacklist t13d1517h2_8daaf6152771_b6f405a00624
-            on_missing_fingerprint closed
-        }
-        respond "not blocked"
-    `)
-	req, err := http.NewRequest(http.MethodGet, base+"/", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set("X-Claimed-JA4", "attacker-chosen")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusForbidden || !strings.HasPrefix(resp.Header.Get("X-Block-Id"), "bp-") {
-		t.Fatalf("bot_policy failed closed? status=%d blockID=%q",
-			resp.StatusCode, resp.Header.Get("X-Block-Id"))
-	}
-}
-
 func TestIntegrationBotPolicyCacheControl(t *testing.T) {
 	for _, tt := range []struct {
-		onMissing string
-		status    int
-		cache     string
+		name, blacklist, cache string
+		status                 int
 	}{
-		{"closed", http.StatusForbidden, "no-store"},
-		{"open", http.StatusOK, "public, max-age=3600"},
+		{"blocked", "127.0.0.1", "no-store", http.StatusForbidden},
+		{"allowed", "198.51.100.1", "public, max-age=3600", http.StatusOK},
 	} {
-		t.Run(tt.onMissing, func(t *testing.T) {
+		t.Run(tt.name, func(t *testing.T) {
 			base := startCaddy(t, `
                 header /assets/* Cache-Control "public, max-age=3600"
-                ja4
                 bot_policy {
-                    blacklist t13d1517h2_8daaf6152771_b6f405a00624
-                    on_missing_fingerprint `+tt.onMissing+`
+                    blacklist `+tt.blacklist+`
                 }
                 respond "asset"
             `)

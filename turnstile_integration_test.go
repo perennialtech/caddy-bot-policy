@@ -54,8 +54,9 @@ func startCaddy(t *testing.T, site string, globalOptions ...string) string {
 	return "http://" + addr
 }
 
-// visitor is a browser without JavaScript: it keeps cookies, does not follow
-// redirects, and submits the challenge form by hand.
+// visitor is a raw HTTP client that manually replays all received cookies,
+// including Secure cookies over HTTP. It tests routing, not browser cookie
+// storage or transmission rules. It does not follow redirects or run JS.
 type visitor struct {
 	t       *testing.T
 	base    string
@@ -98,9 +99,9 @@ func (v *visitor) post(path string, form url.Values) (*http.Response, string) {
 	return v.do(req)
 }
 
-// pass runs the whole challenge for path the way a browser would: GET it,
-// read the form action from the challenge page, submit the token there, and
-// follow the redirect. It returns the final response body.
+// pass follows the challenge form and redirect with raw HTTP requests: GET
+// the page, submit the token, then GET the cleared URL. It returns the final
+// response body without checking browser cookie policy.
 func (v *visitor) pass(path string) string {
 	v.t.Helper()
 	resp, body := v.get(path)
@@ -144,8 +145,8 @@ func integrationFake(t *testing.T) *fakeSiteverify {
 	return f
 }
 
-// TestIntegrationTryFiles is the single-page-app setup from the review:
-// try_files rewrites every unknown path to /index.html. The challenge must
+// TestIntegrationTryFiles checks a single-page-app setup where try_files
+// rewrites every unknown path to /index.html. The challenge must
 // still post back to, and return the visitor to, the URL they asked for.
 func TestIntegrationTryFiles(t *testing.T) {
 	integrationFake(t)

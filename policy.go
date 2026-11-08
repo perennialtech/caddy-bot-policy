@@ -6,16 +6,20 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
+	"net/netip"
+	"os"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
+	"github.com/oschwald/maxminddb-golang/v2"
 	"go.uber.org/zap"
 )
 
 // BotPolicy applies whitelists and blacklists to client IP addresses,
-// TLS client fingerprints (JA4), and User-Agent headers. Fingerprints come
+// TLS client fingerprints (JA4), User-Agent headers, and ASNs. Fingerprints come
 // from the ja4 handler, which needs the ja4 listener or packet conn wrapper
 // to have captured the ClientHello.
 type BotPolicy struct {
@@ -26,24 +30,28 @@ type BotPolicy struct {
 	VarName string `json:"var_name,omitempty"`
 
 	// Whitelist contains JA4 identifiers, IPv4/IPv6 addresses and CIDRs,
-	// and ua:-prefixed Go regular expressions for User-Agent headers.
+	// ua:-prefixed Go regular expressions, and asn:-prefixed AS numbers.
 	// Any match bypasses on_missing_fingerprint closed and downstream
 	// Turnstile challenges, unless Blacklist also matches.
-	// IP matching uses Caddy's resolved client IP, respecting trusted_proxies.
+	// IP and ASN matching use Caddy's resolved client IP, respecting trusted_proxies.
 	// At least one entry in Whitelist or Blacklist is required.
 	Whitelist []string `json:"whitelist,omitempty"`
 
 	// Blacklist accepts the same entries as Whitelist. Any match receives
-	// a 403, regardless of JA4/IP whitelist matches or Turnstile clearance.
+	// a 403, regardless of other whitelist matches or Turnstile clearance.
 	// Blacklist always wins, regardless of prefix length or entry order.
 	// Both lists are validated when the configuration is provisioned.
 	Blacklist []string `json:"blacklist,omitempty"`
 
+	// ASNDB is the local path to a MaxMind GeoLite2-ASN or GeoIP2-ASN MMDB.
+	// It is required when either policy list has an asn: entry. An unreadable
+	// or incompatible database rejects the configuration at startup.
+	ASNDB string `json:"asn_db,omitempty"`
+
 	// OnMissingFingerprint is "open" (let the request through when the ja4
 	// handler published no fingerprint under var_name) or "closed" (block
-	// it). Defaults to "open". IP blacklist and whitelist matches are
-	// evaluated first, even when the fingerprint is missing. User-Agent
-	// matches are also evaluated before the missing-fingerprint policy.
+	// it). Defaults to "open". All lists are evaluated before this policy,
+	// including ASN and User-Agent rules when the fingerprint is missing.
 	OnMissingFingerprint string `json:"on_missing_fingerprint,omitempty"`
 
 	// Action is the response taken when a request is blocked. Only
@@ -53,6 +61,7 @@ type BotPolicy struct {
 
 	whitelist policyList
 	blacklist policyList
+	asnReader *maxminddb.Reader
 	logger    *zap.Logger
 }
 
@@ -64,6 +73,7 @@ type policyList struct {
 	fingerprints map[string]bool
 	ips          caddyhttp.MatchClientIP
 	userAgents   []*regexp.Regexp
+	asns         map[uint32]bool
 }
 
 // Matches the fixed-width identifiers produced by clientHello.ja4,
@@ -74,8 +84,18 @@ func (list *policyList) provision(ctx caddy.Context, entries []string) error {
 	list.fingerprints = make(map[string]bool)
 	list.ips = caddyhttp.MatchClientIP{}
 	list.userAgents = nil
+	list.asns = make(map[uint32]bool)
 	for _, entry := range entries {
-		if pattern, ok := strings.CutPrefix(entry, "ua:"); ok {
+		if number, ok := strings.CutPrefix(entry, "asn:"); ok {
+			if number == "" || strings.IndexFunc(number, func(r rune) bool { return r < '0' || r > '9' }) >= 0 {
+				return fmt.Errorf("invalid ASN %q", entry)
+			}
+			asn, err := strconv.ParseUint(number, 10, 32)
+			if err != nil || asn == 0 {
+				return fmt.Errorf("invalid ASN %q (must be between 1 and 4294967295)", entry)
+			}
+			list.asns[uint32(asn)] = true
+		} else if pattern, ok := strings.CutPrefix(entry, "ua:"); ok {
 			if pattern == "" {
 				return fmt.Errorf("empty User-Agent pattern %q", entry)
 			}
@@ -93,8 +113,11 @@ func (list *policyList) provision(ctx caddy.Context, entries []string) error {
 	return list.ips.Provision(ctx)
 }
 
-func (list policyList) match(r *http.Request, fingerprint string) (bool, error) {
+func (list policyList) match(r *http.Request, fingerprint string, asn uint32) (bool, error) {
 	if list.fingerprints[fingerprint] {
+		return true, nil
+	}
+	if asn != 0 && list.asns[asn] {
 		return true, nil
 	}
 	if userAgent := r.Header.Get("User-Agent"); userAgent != "" {
@@ -150,7 +173,29 @@ func (bp *BotPolicy) Provision(ctx caddy.Context) error {
 	if err := bp.blacklist.provision(ctx, bp.Blacklist); err != nil {
 		return fmt.Errorf("bot_policy: blacklist: %w", err)
 	}
-	return bp.Validate()
+	if err := bp.Validate(); err != nil {
+		return err
+	}
+	if len(bp.whitelist.asns) > 0 || len(bp.blacklist.asns) > 0 {
+		if bp.ASNDB == "" {
+			return fmt.Errorf("bot_policy: asn_db is required for ASN rules")
+		}
+		data, err := os.ReadFile(bp.ASNDB)
+		if err != nil {
+			return fmt.Errorf("bot_policy: read asn_db %q: %w", bp.ASNDB, err)
+		}
+		// Keep the database in memory: Caddy may unload a config before
+		// in-flight requests on its old HTTP server finish.
+		reader, err := maxminddb.OpenBytes(data)
+		if err != nil {
+			return fmt.Errorf("bot_policy: open asn_db %q: %w", bp.ASNDB, err)
+		}
+		if reader.Metadata.DatabaseType != "GeoLite2-ASN" && reader.Metadata.DatabaseType != "GeoIP2-ASN" {
+			return fmt.Errorf("bot_policy: asn_db %q is not a MaxMind ASN database", bp.ASNDB)
+		}
+		bp.asnReader = reader
+	}
+	return nil
 }
 
 // Validate ensures bp has at least one policy entry.
@@ -164,20 +209,49 @@ func (bp *BotPolicy) Validate() error {
 // ServeHTTP implements caddyhttp.MiddlewareHandler.
 func (bp *BotPolicy) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
 	fingerprint := trustedFingerprint(r, bp.VarName)
-	blacklisted, err := bp.blacklist.match(r, fingerprint)
+	// In 0-RTT, the source IP is not yet verified. A known blacklist
+	// match can still block, and a non-IP whitelist can still bypass
+	// when there are no unresolved ASN blacklist rules.
+	early := bp.asnReader != nil && r.TLS != nil && !r.TLS.HandshakeComplete
+	var asn uint32
+	if bp.asnReader != nil && !early {
+		ip, _ := caddyhttp.GetVar(r.Context(), caddyhttp.ClientIPVarKey).(string)
+		if addr, err := netip.ParseAddr(ip); err == nil {
+			result := bp.asnReader.Lookup(addr.Unmap())
+			var record struct {
+				ASN uint32 `maxminddb:"autonomous_system_number"`
+			}
+			if err := result.Err(); err != nil {
+				bp.logger.Error("ASN lookup failed", zap.Error(err))
+			} else if result.Found() {
+				if err := result.Decode(&record); err != nil {
+					bp.logger.Error("ASN lookup failed", zap.Error(err))
+				} else {
+					asn = record.ASN
+				}
+			}
+		}
+	}
+	blacklisted, err := bp.blacklist.match(r, fingerprint, asn)
 	if err != nil {
 		return err
 	}
 	if blacklisted {
 		return bp.block(w, r, fingerprint)
 	}
-	whitelisted, err := bp.whitelist.match(r, fingerprint)
+	if early && len(bp.blacklist.asns) > 0 {
+		return caddyhttp.Error(http.StatusTooEarly, fmt.Errorf("TLS handshake not complete, client IP cannot be verified"))
+	}
+	whitelisted, err := bp.whitelist.match(r, fingerprint, asn)
 	if err != nil {
 		return err
 	}
 	if whitelisted {
 		r = r.WithContext(context.WithValue(r.Context(), policyWhitelistKey{}, true))
 		return next.ServeHTTP(w, r)
+	}
+	if early {
+		return caddyhttp.Error(http.StatusTooEarly, fmt.Errorf("TLS handshake not complete, client IP cannot be verified"))
 	}
 	if fingerprint == "" && bp.OnMissingFingerprint == "closed" {
 		return bp.block(w, r, fingerprint)

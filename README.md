@@ -42,13 +42,16 @@ To keep an existing reverse proxy for TLS and routing, run Caddy with
 this plugin between that proxy and the backend:
 
 ```
-client → front proxy (TLS, routing) → Caddy with turnstile → backend
+client → nginx (TLS, routing) → Caddy with turnstile → backend
 ```
 
 [examples/proxy](examples/proxy) runs this with Docker Compose:
 `docker compose up --build` in that directory, then open
-`https://localhost`. It builds the filter from the current checkout
-and uses Cloudflare's testing keys unless you set `TURNSTILE_SITE_KEY` and
+`https://localhost` (accept the self-signed certificate warning for this
+local example). nginx generates a self-signed certificate at startup; use
+a trusted certificate for real sites. The example builds the filter from
+the current checkout and uses Cloudflare's testing keys unless you set
+`TURNSTILE_SITE_KEY` and
 `TURNSTILE_SECRET_KEY`. The filter takes its listen address, upstream and
 trusted proxies from `BIND`, `TARGET` and `TRUSTED_PROXIES`.
 

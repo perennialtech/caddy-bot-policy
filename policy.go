@@ -32,7 +32,7 @@ type BotPolicy struct {
 	// Both lists are validated when the configuration is provisioned.
 	Blacklist []string `json:"blacklist,omitempty"`
 
-	// ASNDB is the local path to a MaxMind GeoLite2-ASN or GeoIP2-ASN MMDB.
+	// ASNDB is the local path to a GeoLite2-compatible or GeoIP2-ASN MMDB.
 	// It is required when either policy list has an asn: entry. An unreadable
 	// or incompatible database rejects the configuration at startup.
 	ASNDB string `json:"asn_db,omitempty"`
@@ -149,8 +149,8 @@ func (bp *BotPolicy) Provision(ctx caddy.Context) error {
 		if err != nil {
 			return fmt.Errorf("bot_policy: open asn_db %q: %w", bp.ASNDB, err)
 		}
-		if reader.Metadata.DatabaseType != "GeoLite2-ASN" && reader.Metadata.DatabaseType != "GeoIP2-ASN" {
-			return fmt.Errorf("bot_policy: asn_db %q is not a MaxMind ASN database", bp.ASNDB)
+		if reader.Metadata.DatabaseType != "GeoLite2-ASN" && reader.Metadata.DatabaseType != "GeoIP2-ASN" && !strings.Contains(reader.Metadata.DatabaseType, "compat=GeoLite2-ASN") {
+			return fmt.Errorf("bot_policy: asn_db %q is not a compatible ASN database", bp.ASNDB)
 		}
 		bp.asnReader = reader
 	}

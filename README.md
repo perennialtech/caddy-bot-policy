@@ -36,6 +36,42 @@ to proxy the site. The canonical option references are the Caddyfile parser
 in [caddyfile.go](caddyfile.go) and the handler options in
 [turnstile.go](turnstile.go).
 
+## Run as a separate proxy
+
+To keep an existing reverse proxy for TLS and routing, run Caddy with
+this plugin between that proxy and the backend:
+
+```
+client → front proxy (TLS, routing) → Caddy with turnstile → backend
+```
+
+[examples/proxy](examples/proxy) runs this with Docker Compose:
+`docker compose up --build` in that directory, then open
+`https://localhost`. It builds the plugin into Caddy and uses Cloudflare's
+testing keys unless you set `TURNSTILE_SITE_KEY` and
+`TURNSTILE_SECRET_KEY`. The filter takes its listen address, upstream and
+trusted proxies from `BIND`, `TARGET` and `TRUSTED_PROXIES`.
+
+The front proxy and the filter must agree on a few things:
+
+- Set `trusted_proxies` on the filter to the front proxy's addresses.
+  Otherwise `client_ip` matchers and Turnstile's `remoteip` see the proxy's
+  address instead of the visitor's.
+- Forward the visitor's address in `X-Forwarded-For`, or configure the
+  filter's `client_ip_headers` for another header that the front proxy
+  overwrites (nginx: `proxy_set_header X-Real-IP $remote_addr;` with
+  `client_ip_headers X-Real-IP` on the filter). If the front proxy appends
+  to incoming `X-Forwarded-For`, enable `trusted_proxies_strict` on the
+  filter to prevent client-supplied addresses from bypassing IP rules.
+- Forward the original `Host` header. Turnstile verifies the hostname on
+  which the challenge was solved. Caddy and Traefik preserve it by default;
+  nginx needs `proxy_set_header Host $host`.
+- Leave `allow_insecure_cookie` off. The filter receives HTTP, but visitors
+  use HTTPS, so the clearance cookie must remain `Secure`.
+
+The filter receives each request's original `Host`, so one instance can
+serve multiple sites. The operational requirements below also apply.
+
 ## Operational requirements
 
 **Protect challenge responses and verification requests.**

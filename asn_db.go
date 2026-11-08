@@ -43,22 +43,22 @@ func newASNDatabase(path string, logger *zap.Logger) (*asnDatabase, error) {
 func (db *asnDatabase) refresh() error {
 	info, err := os.Stat(db.path)
 	if err != nil {
-		return fmt.Errorf("bot_policy: stat asn_db %q: %w", db.path, err)
+		return fmt.Errorf("asn: stat asn_db %q: %w", db.path, err)
 	}
 	if db.reader.Load() != nil && info.ModTime().Equal(db.modTime) && info.Size() == db.size {
 		return nil
 	}
 	data, err := os.ReadFile(db.path)
 	if err != nil {
-		return fmt.Errorf("bot_policy: read asn_db %q: %w", db.path, err)
+		return fmt.Errorf("asn: read asn_db %q: %w", db.path, err)
 	}
 	// In-memory readers remain valid for requests already using the old one.
 	reader, err := maxminddb.OpenBytes(data)
 	if err != nil {
-		return fmt.Errorf("bot_policy: open asn_db %q: %w", db.path, err)
+		return fmt.Errorf("asn: open asn_db %q: %w", db.path, err)
 	}
 	if reader.Metadata.DatabaseType != "GeoLite2-ASN" && reader.Metadata.DatabaseType != "GeoIP2-ASN" && !strings.Contains(reader.Metadata.DatabaseType, "compat=GeoLite2-ASN") {
-		return fmt.Errorf("bot_policy: asn_db %q is not a compatible ASN database", db.path)
+		return fmt.Errorf("asn: asn_db %q is not a compatible ASN database", db.path)
 	}
 	db.reader.Store(reader)
 	db.modTime = info.ModTime()

@@ -2,6 +2,7 @@ package botpolicy
 
 import (
 	"strconv"
+	"strings"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
@@ -9,35 +10,37 @@ import (
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 )
 
-// parseCaddyfile sets up a bot_policy handler from Caddyfile tokens.
+// UnmarshalCaddyfile implements caddyfile.Unmarshaler for the ASN matcher.
 //
-//	bot_policy {
-//		asn_db                 /var/lib/geoip/GeoLite2-ASN.mmdb
-//		// Or: asn_db maxmind {
-//		//     account_id  {env.MAXMIND_ACCOUNT_ID}
-//		//     license_key {env.MAXMIND_LICENSE_KEY}
-//		// }
-//		whitelist              192.0.2.10 2001:db8:1::/48 "ua:(?i)googlebot"
-//		whitelist              asn:13335
-//		blacklist              198.51.100.0/24
-//		action                 block-403
+//	@blockedASN asn {
+//	    numbers 13335 64500
+//	    asn_db maxmind {
+//	        account_id {env.MAXMIND_ACCOUNT_ID}
+//	        license_key {env.MAXMIND_LICENSE_KEY}
+//	    }
 //	}
-func parseCaddyfile(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error) {
-	var bp BotPolicy
-	if err := bp.UnmarshalCaddyfile(h.Dispenser); err != nil {
-		return nil, err
-	}
-	return &bp, nil
-}
-
-// UnmarshalCaddyfile implements caddyfile.Unmarshaler.
-func (bp *BotPolicy) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
+func (m *MatchASN) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	for d.Next() {
 		if d.NextArg() {
-			return d.ArgErr() // no inline args are supported, only a block
+			return d.ArgErr()
 		}
 		for d.NextBlock(0) {
 			switch d.Val() {
+			case "numbers":
+				args := d.RemainingArgs()
+				if len(args) == 0 {
+					return d.ArgErr()
+				}
+				for _, number := range args {
+					if number == "" || strings.IndexFunc(number, func(r rune) bool { return r < '0' || r > '9' }) >= 0 {
+						return d.Err("ASN must be an unsigned decimal number")
+					}
+					asn, err := strconv.ParseUint(number, 10, 32)
+					if err != nil || asn == 0 {
+						return d.Err("ASN must be between 1 and 4294967295")
+					}
+					m.ASNs = append(m.ASNs, uint32(asn))
+				}
 			case "asn_db":
 				if !d.NextArg() {
 					return d.ArgErr()
@@ -46,16 +49,14 @@ func (bp *BotPolicy) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				if d.NextArg() {
 					return d.ArgErr()
 				}
-				if bp.ASNDB != "" || bp.MaxMind != nil {
+				if m.ASNDB != "" || m.MaxMind != nil {
 					return d.Err("asn_db may only be configured once")
 				}
 				if value == "maxmind" {
-					bp.MaxMind = &MaxMindASN{}
+					m.MaxMind = &MaxMindASN{}
 					for d.NextBlock(1) {
 						key := d.Val()
-						switch key {
-						case "account_id", "license_key":
-						default:
+						if key != "account_id" && key != "license_key" {
 							return d.Errf("unknown maxmind option %q", key)
 						}
 						if !d.NextArg() {
@@ -66,41 +67,19 @@ func (bp *BotPolicy) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 							return d.ArgErr()
 						}
 						if key == "account_id" {
-							bp.MaxMind.AccountID = arg
+							m.MaxMind.AccountID = arg
 						} else {
-							bp.MaxMind.LicenseKey = arg
+							m.MaxMind.LicenseKey = arg
 						}
 					}
-					if bp.MaxMind.AccountID == "" || bp.MaxMind.LicenseKey == "" {
+					if m.MaxMind.AccountID == "" || m.MaxMind.LicenseKey == "" {
 						return d.Err("maxmind requires account_id and license_key")
 					}
 				} else {
-					bp.ASNDB = value
+					m.ASNDB = value
 				}
-
-			case "whitelist", "blacklist":
-				sub := d.Val()
-				args := d.RemainingArgs()
-				if len(args) == 0 {
-					return d.ArgErr()
-				}
-				if sub == "whitelist" {
-					bp.Whitelist = append(bp.Whitelist, args...)
-				} else {
-					bp.Blacklist = append(bp.Blacklist, args...)
-				}
-
-			case "action":
-				if !d.NextArg() {
-					return d.ArgErr()
-				}
-				bp.Action = d.Val()
-				if d.NextArg() {
-					return d.ArgErr()
-				}
-
 			default:
-				return d.Errf("unrecognized bot_policy subdirective '%s'", d.Val())
+				return d.Errf("unknown asn option %q", d.Val())
 			}
 		}
 	}

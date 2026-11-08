@@ -42,7 +42,7 @@ type maxMindCredentials struct {
 }
 
 type maxMindUser struct {
-	owner  *BotPolicy
+	owner  *MatchASN
 	creds  maxMindCredentials
 	logger *zap.Logger
 }
@@ -69,7 +69,7 @@ func maxMindCachePath() string {
 	return filepath.Join(caddy.AppDataDir(), "bot_policy", "GeoLite2-ASN.mmdb")
 }
 
-func acquireMaxMindDB(path string, owner *BotPolicy, cfg MaxMindASN, logger *zap.Logger) (*managedASNDB, error) {
+func acquireMaxMindDB(path string, owner *MatchASN, cfg MaxMindASN, logger *zap.Logger) (*managedASNDB, error) {
 	value, _, err := maxMindDatabases.LoadOrNew(path, func() (caddy.Destructor, error) {
 		ctx, cancel := context.WithCancel(context.Background())
 		db := &managedASNDB{
@@ -100,7 +100,7 @@ func acquireMaxMindDB(path string, owner *BotPolicy, cfg MaxMindASN, logger *zap
 	return db, nil
 }
 
-func (db *managedASNDB) addUser(owner *BotPolicy, cfg MaxMindASN, logger *zap.Logger) {
+func (db *managedASNDB) addUser(owner *MatchASN, cfg MaxMindASN, logger *zap.Logger) {
 	db.usersMu.Lock()
 	defer db.usersMu.Unlock()
 	credentials := maxMindCredentials{cfg.AccountID, cfg.LicenseKey}
@@ -109,7 +109,7 @@ func (db *managedASNDB) addUser(owner *BotPolicy, cfg MaxMindASN, logger *zap.Lo
 	db.logger.Store(logger)
 }
 
-func (db *managedASNDB) removeUser(owner *BotPolicy) {
+func (db *managedASNDB) removeUser(owner *MatchASN) {
 	db.usersMu.Lock()
 	defer db.usersMu.Unlock()
 	for i, user := range db.users {

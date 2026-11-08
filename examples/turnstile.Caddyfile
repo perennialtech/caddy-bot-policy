@@ -1,11 +1,44 @@
 example.com {
-    bot_policy {
-        whitelist 192.0.2.10 2001:db8:1::/48
-        blacklist 198.51.100.0/24 "ua:(?i)badbot"
+    @blockedIP client_ip 198.51.100.0/24
+    @blockedUA header_regexp User-Agent "(?i)badbot"
+    @blockedASN asn {
+        numbers 13335
+        asn_db /var/lib/geoip/GeoLite2-ASN.mmdb
     }
-    turnstile {
-        site_key {env.TURNSTILE_SITE_KEY}
-        secret_key {env.TURNSTILE_SECRET_KEY}
+
+    @trustedIP client_ip 192.0.2.10 2001:db8:1::/48
+    @trustedUA header_regexp User-Agent "^TrustedMonitor/"
+    @trustedASN asn {
+        numbers 64500
+        asn_db /var/lib/geoip/GeoLite2-ASN.mmdb
     }
-    reverse_proxy localhost:8080
+    @monitor secret_header X-Monitor-Token {env.MONITOR_TOKEN}
+
+    route {
+        respond @blockedIP 403
+        respond @blockedUA 403
+        respond @blockedASN 403
+
+        # Each handle is a separate whitelist alternative (logical OR).
+        handle @trustedIP {
+            reverse_proxy localhost:8080
+        }
+        handle @trustedUA {
+            reverse_proxy localhost:8080
+        }
+        handle @trustedASN {
+            reverse_proxy localhost:8080
+        }
+        handle @monitor {
+            request_header -X-Monitor-Token
+            reverse_proxy localhost:8080
+        }
+        handle {
+            turnstile {
+                site_key {env.TURNSTILE_SITE_KEY}
+                secret_key {env.TURNSTILE_SECRET_KEY}
+            }
+            reverse_proxy localhost:8080
+        }
+    }
 }

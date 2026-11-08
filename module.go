@@ -1,5 +1,5 @@
-// Package botpolicy provides Caddy policy matching for IP addresses,
-// User-Agent headers and ASNs, and Cloudflare Turnstile challenges.
+// Package botpolicy provides ASN and secret-header request matchers and
+// Cloudflare Turnstile challenges.
 package botpolicy
 
 import (
@@ -8,15 +8,13 @@ import (
 )
 
 func init() {
-	caddy.RegisterModule(BotPolicy{})
+	caddy.RegisterModule(MatchASN{})
+	caddy.RegisterModule(MatchSecretHeader{})
 	caddy.RegisterModule(Turnstile{})
 
-	httpcaddyfile.RegisterHandlerDirective("bot_policy", parseCaddyfile)
 	httpcaddyfile.RegisterHandlerDirective("turnstile", parseTurnstileCaddyfile)
 
-	// Evaluate policy and challenge on the original request URI, before
-	// rewrite, redir, and try_files. Blocklisted clients cannot be cleared
-	// by Turnstile.
-	httpcaddyfile.RegisterDirectiveOrder("bot_policy", httpcaddyfile.Before, "redir")
+	// Challenge before rewrite, redir and try_files unless route order
+	// is made explicit. Native Caddy matchers compose the policy.
 	httpcaddyfile.RegisterDirectiveOrder("turnstile", httpcaddyfile.Before, "redir")
 }

@@ -310,9 +310,8 @@ func TestIntegrationFailedVerificationRecovers(t *testing.T) {
 	}
 }
 
-// TestIntegrationDirectiveOrder pins down where the Caddyfile puts the
-// handlers: bot_policy and turnstile, in that order, and both
-// before anything that rewrites the URL.
+// TestIntegrationDirectiveOrder checks the remaining Turnstile directive
+// runs before a rewrite on the unmodified request path.
 func TestIntegrationDirectiveOrder(t *testing.T) {
 	cfg := `example.com {
 	file_server
@@ -323,9 +322,6 @@ func TestIntegrationDirectiveOrder(t *testing.T) {
 		site_key a
 		secret_key b
 	}
-	bot_policy {
-		blacklist 192.0.2.1
-	}
 	header X-Test 1
 }`
 	adapted, _, err := caddyfile.Adapter{ServerType: httpcaddyfile.ServerType{}}.Adapt([]byte(cfg), nil)
@@ -333,7 +329,7 @@ func TestIntegrationDirectiveOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	js := string(adapted)
-	order := []string{`"handler":"headers"`, `"handler":"bot_policy"`, `"handler":"turnstile"`, `"handler":"static_response"`, `"handler":"rewrite"`, `"handler":"file_server"`}
+	order := []string{`"handler":"headers"`, `"handler":"turnstile"`, `"handler":"static_response"`, `"handler":"rewrite"`, `"handler":"file_server"`}
 	last := -1
 	for _, h := range order {
 		i := strings.Index(js, h)
@@ -437,9 +433,9 @@ func TestIntegrationIndependentProtectedRoutes(t *testing.T) {
 	}
 }
 
-func TestIntegrationBotPolicyCacheControl(t *testing.T) {
+func TestIntegrationNativeBlockCacheControl(t *testing.T) {
 	for _, tt := range []struct {
-		name, blacklist, cache string
+		name, blockedIP, cache string
 		status                 int
 	}{
 		{"blocked", "127.0.0.1", "no-store", http.StatusForbidden},
@@ -447,15 +443,17 @@ func TestIntegrationBotPolicyCacheControl(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			base := startCaddy(t, `
+                @blocked client_ip `+tt.blockedIP+`
                 header /assets/* Cache-Control "public, max-age=3600"
-                bot_policy {
-                    blacklist `+tt.blacklist+`
+                route {
+                    header @blocked Cache-Control no-store
+                    respond @blocked 403
+                    respond /assets/* asset
                 }
-                respond "asset"
             `)
 			resp, _ := newVisitor(t, base).get("/assets/app.css")
 			if resp.StatusCode != tt.status {
-				t.Fatalf("status = %d, want %d", resp.StatusCode, tt.status)
+				t.Fatalf("status %d, want %d", resp.StatusCode, tt.status)
 			}
 			if got := resp.Header.Get("Cache-Control"); got != tt.cache {
 				t.Errorf("Cache-Control = %q, want %q", got, tt.cache)

@@ -1,17 +1,26 @@
 {
-	servers {
-		trusted_proxies static {$TRUSTED_PROXIES}
-	}
+    servers {
+        trusted_proxies static {$TRUSTED_PROXIES}
+    }
 }
 
 http://{$BIND} {
-	bot_policy {
-		whitelist 192.0.2.10 2001:db8:1::/48
-		blacklist 198.51.100.0/24 "ua:(?i)badbot"
-	}
-	turnstile {
-		site_key {env.TURNSTILE_SITE_KEY}
-		secret_key {env.TURNSTILE_SECRET_KEY}
-	}
-	reverse_proxy {$TARGET}
+    @trustedIP client_ip 192.0.2.10 2001:db8:1::/48
+    @blockedIP client_ip 198.51.100.0/24
+    @blockedUA header_regexp User-Agent "(?i)badbot"
+
+    route {
+        respond @blockedIP 403
+        respond @blockedUA 403
+        handle @trustedIP {
+            reverse_proxy {$TARGET}
+        }
+        handle {
+            turnstile {
+                site_key {env.TURNSTILE_SITE_KEY}
+                secret_key {env.TURNSTILE_SECRET_KEY}
+            }
+            reverse_proxy {$TARGET}
+        }
+    }
 }

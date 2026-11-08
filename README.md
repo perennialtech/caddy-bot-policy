@@ -49,14 +49,16 @@ client → nginx (TLS, routing) → Caddy with turnstile → backend
 `docker compose up --build` in that directory, then open
 `https://localhost` (accept the self-signed certificate warning for this
 local example). nginx generates a self-signed certificate at startup; use
-a trusted certificate for real sites. The example builds the plugin into
-Caddy and uses Cloudflare's testing keys unless you set `TURNSTILE_SITE_KEY` and
+a trusted certificate for real sites. The example builds the filter from
+the current checkout and uses Cloudflare's testing keys unless you set
+`TURNSTILE_SITE_KEY` and
 `TURNSTILE_SECRET_KEY`. The filter takes its listen address, upstream and
 trusted proxies from `BIND`, `TARGET` and `TRUSTED_PROXIES`.
 
-The example resolves the plugin remotely without pinning a module version;
-it does not build the current checkout. For tests of local source changes,
-use the local module replacement shown in [test/browser/run.py](test/browser/run.py).
+CI publishes `ghcr.io/perennialtech/caddy-bot-policy:latest` and
+`sha-<commit SHA>` images on pushes to `main`. To use a published image,
+replace the filter's `build` in Compose with `image:` pointing at that tag.
+Authenticate to GHCR if the package is private.
 
 The front proxy and the filter must agree on a few things:
 

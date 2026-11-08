@@ -10,7 +10,9 @@ services:
       - 443:443
 
   filter:
-    build: .
+    build:
+      context: ../..
+      dockerfile: examples/proxy/Dockerfile
     environment:
       BIND: ":3000"
       TARGET: http://whoami:80

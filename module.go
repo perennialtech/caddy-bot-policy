@@ -1,5 +1,4 @@
-// Package botpolicy provides ASN and secret-header request matchers and
-// Cloudflare Turnstile challenges.
+// Package botpolicy provides Cloudflare Turnstile challenges for Caddy.
 package botpolicy
 
 import (
@@ -8,8 +7,6 @@ import (
 )
 
 func init() {
-	caddy.RegisterModule(MatchASN{})
-	caddy.RegisterModule(MatchSecretHeader{})
 	caddy.RegisterModule(Turnstile{})
 
 	httpcaddyfile.RegisterHandlerDirective("turnstile", parseTurnstileCaddyfile)

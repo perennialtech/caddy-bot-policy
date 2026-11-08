@@ -1,7 +1,7 @@
 # caddy-bot-policy
 
-A [Caddy](https://caddyserver.com) module providing ASN and secret-header
-request matchers plus [Cloudflare Turnstile](https://developers.cloudflare.com/turnstile/)
+A [Caddy](https://caddyserver.com) module providing
+[Cloudflare Turnstile](https://developers.cloudflare.com/turnstile/)
 challenge clearances. Caddy's native matchers and routes decide which clients
 are blocked, allowed, or challenged.
 
@@ -17,91 +17,24 @@ xcaddy build v2.11.9 --with github.com/perennialtech/caddy-bot-policy
 
 Start with [examples/turnstile.Caddyfile](examples/turnstile.Caddyfile).
 Replace its matchers and upstream, and supply `TURNSTILE_SITE_KEY`,
-`TURNSTILE_SECRET_KEY`, and `MONITOR_TOKEN`.
+`TURNSTILE_SECRET_KEY`.
 
-The previous `bot_policy` directive has been removed. To migrate:
-
-- Replace IP and CIDR rules with Caddy's `client_ip` matcher, and
-  `ua:` regular expressions with `header_regexp User-Agent`.
-- Replace `asn:` rules with named `asn` matchers. Each matcher takes a
-  `numbers` list and an `asn_db` source (a local file or `maxmind` block).
-- Replace trusted-monitor rules with `secret_header <name> <secret>`.
-  Placeholders including `{env.*}` resolve once during provisioning.
-- Replace `blacklist` rules with `respond` matches at the top of a `route`.
-  Use separate `respond` directives for each alternative. Put them before
-  any allow routes so that a blacklist match wins even for a cleared client.
-- Replace each `whitelist` alternative with a separate `handle` matching
-  that condition and going directly to the upstream. These handles are
-  mutually exclusive with the final fallback `handle` containing `turnstile`
-  and the upstream. Putting different matcher types in one named matcher
-  combines them with AND, **not** OR. Use separate handles for OR, or combine
-  matchers deliberately to require multiple conditions.
+Use native Caddy `client_ip` and `header_regexp` matchers to select which
+clients are blocked, allowed, or challenged. Put `respond` rules before
+allowed `handle` routes, followed by a fallback `handle` containing
+`turnstile`. Each `handle` is an alternative (logical OR); matchers within
+one named matcher are combined with AND.
 
 The complete example also shows evaluation before rewrites: explicit `route`
 order is authoritative. Do not put rewrites ahead of the policy decisions.
 Use `path` and `method` matchers to scope checks; a Turnstile-protected
 page needs GET and POST for verification.
 
-`asn` uses Caddy's resolved client IP, including its `trusted_proxies`
-configuration, not the raw `X-Forwarded-For` header. An ASN matcher returns
-HTTP 425 during an incomplete TLS handshake rather than treating an unsafe
-0-RTT lookup as a nonmatch; this remains safe even when negated with `not`.
-Caddy's `client_ip` matcher also returns HTTP 425 in 0-RTT. An unmapped IP
-or a different ASN is a normal nonmatch. A failed lookup returns an error.
-
-`secret_header` validates the header name and rejects an empty secret,
-including an unset environment placeholder. It compares every supplied
-header value exactly, in constant time, with a case-insensitive header name.
-Unlike `header`, it has no wildcard semantics. **Keep the secret out of
-access logs:** Caddy records custom request headers in plain text by default.
-`Cookie`, `Set-Cookie`, `Authorization`, and `Proxy-Authorization` are redacted
-by default unless `log_credentials` is enabled. Use Caddy's log filtering for
-custom credentials, or send a secret through `Authorization` instead. These
-headers are also forwarded to the upstream unless removed: place
-`request_header -X-Monitor-Token` after the matching decision and before
-`reverse_proxy` **in every upstream route**, as in the example: an otherwise
-trusted IP or User-Agent may still send the monitor token. Never use
-User-Agent matching as
-authentication; the client controls it.
-
 The `turnstile` handler still serves challenges until the client presents a
 signed clearance. Supply keys for your hostname; Cloudflare does not need
 to proxy the site. The canonical option references are the Caddyfile parser
-in [caddyfile.go](caddyfile.go), the matcher types in
-[asn_matcher.go](asn_matcher.go) and [secret_header.go](secret_header.go),
-and the handler options in [turnstile.go](turnstile.go).
-
-### ASN database management
-
-Use managed MaxMind GeoLite2 ASN data by placing this inside an `asn` matcher:
-
-```caddyfile
-asn_db maxmind {
-    account_id {env.MAXMIND_ACCOUNT_ID}
-    license_key {env.MAXMIND_LICENSE_KEY}
-}
-```
-
-Caddy downloads the database on first start, caches it in its existing data
-directory, checks for updated builds daily, and swaps in new data without
-reloading. If a cached copy exists, startup does not wait for MaxMind;
-failed updates keep the cached data in service.
-
-Alternatively, use a local GeoLite2, GeoIP2 ASN, or
-[DB-IP ASN Lite](https://db-ip.com/db/download/ip-to-asn-lite) MMDB with
-`asn_db /path/to/asn.mmdb` inside the matcher. Replace that file atomically;
-Caddy detects the replacement within a minute without reloading its config.
-Shared file watchers and MaxMind refreshers remain shared across matchers.
-Unknown or unmapped IPs do not match. A usable database is required at start.
-
-### Native blocking differences
-
-With `respond @blocked 403`, Caddy returns a normal 403 response. The old
-`bot_policy`-specific `bp-` block ID, `X-Block-Id` response header, block
-log message and automatic `Cache-Control: no-store` header are no longer
-provided by the plugin. Add Caddy `header` rules (for example,
-`header @blocked Cache-Control no-store`) and request logging if needed.
-Turnstile verification errors still have their own `ts-` block IDs.
+in [caddyfile.go](caddyfile.go) and the handler options in
+[turnstile.go](turnstile.go).
 
 ## Operational requirements
 

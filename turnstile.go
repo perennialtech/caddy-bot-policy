@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -224,7 +225,7 @@ func (ts *Turnstile) Cleanup() error {
 
 // ServeHTTP implements caddyhttp.MiddlewareHandler.
 func (ts *Turnstile) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
-	if r.Context().Value(policyWhitelistKey{}) == true || ts.cleared(r) {
+	if ts.cleared(r) {
 		return next.ServeHTTP(w, r)
 	}
 	if r.Method == http.MethodPost && isFormPost(r) {
@@ -617,3 +618,10 @@ var (
 	_ caddyhttp.MiddlewareHandler = (*Turnstile)(nil)
 	_ caddyfile.Unmarshaler       = (*Turnstile)(nil)
 )
+
+// newBlockID identifies Turnstile request failures in logs and responses.
+func newBlockID(prefix string) string {
+	var b [16]byte
+	_, _ = rand.Read(b[:])
+	return prefix + hex.EncodeToString(b[:])
+}

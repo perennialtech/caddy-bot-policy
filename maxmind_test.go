@@ -26,7 +26,7 @@ import (
 
 func TestMaxMindLoggerFollowsActiveConfig(t *testing.T) {
 	db := new(managedASNDB)
-	a, b := new(BotPolicy), new(BotPolicy)
+	a, b := new(MatchASN), new(MatchASN)
 	first, second := zap.NewNop(), zap.NewNop()
 	db.addUser(a, MaxMindASN{AccountID: "first"}, first)
 	db.addUser(b, MaxMindASN{AccountID: "second"}, second)
@@ -134,11 +134,11 @@ func fixtureServer(t *testing.T, state *maxMindFixture) *httptest.Server {
 	}))
 }
 
-func provisionManagedPolicy(t *testing.T) *BotPolicy {
+func provisionManagedPolicy(t *testing.T) *MatchASN {
 	t.Helper()
-	bp := &BotPolicy{
-		Blacklist: []string{"asn:13335"},
-		MaxMind:   &MaxMindASN{AccountID: "12345", LicenseKey: "secret-license"},
+	bp := &MatchASN{
+		ASNs:    []uint32{13335},
+		MaxMind: &MaxMindASN{AccountID: "12345", LicenseKey: "secret-license"},
 	}
 	if err := bp.Provision(caddy.Context{}); err != nil {
 		t.Fatal(err)
@@ -147,16 +147,19 @@ func provisionManagedPolicy(t *testing.T) *BotPolicy {
 	return bp
 }
 
-func managedResponse(t *testing.T, bp *BotPolicy) int {
+func managedResponse(t *testing.T, bp *MatchASN) int {
 	t.Helper()
 	req := newTurnstileRequest(http.MethodGet, "https://"+testHost+"/", nil)
 	req.TLS.HandshakeComplete = true
 	caddyhttp.SetVar(req.Context(), caddyhttp.ClientIPVarKey, "203.0.113.7")
-	rec := httptest.NewRecorder()
-	if err := bp.ServeHTTP(rec, req, passThrough); err != nil {
+	matched, err := bp.MatchWithError(req)
+	if err != nil {
 		t.Fatal(err)
 	}
-	return rec.Code
+	if matched {
+		return http.StatusForbidden
+	}
+	return http.StatusOK
 }
 
 func TestMaxMindDownloadsRefreshesAndPreservesCache(t *testing.T) {
@@ -267,9 +270,9 @@ func TestMaxMindCacheReuseAndConfigGenerations(t *testing.T) {
 	}
 	// A failed Caddy reload provisions a new handler and then cleans it up.
 	// Its credentials must not remain on the still-running refresher.
-	rejected := &BotPolicy{
-		Blacklist: []string{"asn:13335"},
-		MaxMind:   &MaxMindASN{AccountID: "12345", LicenseKey: "rejected-key"},
+	rejected := &MatchASN{
+		ASNs:    []uint32{13335},
+		MaxMind: &MaxMindASN{AccountID: "12345", LicenseKey: "rejected-key"},
 	}
 	if err := rejected.Provision(caddy.Context{}); err != nil {
 		t.Fatal(err)
@@ -322,9 +325,9 @@ func TestMaxMindProvisionFailureWithoutCache(t *testing.T) {
 	maxMindDownloadURL = server.URL + "/download"
 	defer func() { maxMindDownloadURL = maxMindASNURL }()
 
-	bp := &BotPolicy{
-		Blacklist: []string{"asn:13335"},
-		MaxMind:   &MaxMindASN{AccountID: "12345", LicenseKey: "secret-license"},
+	bp := &MatchASN{
+		ASNs:    []uint32{13335},
+		MaxMind: &MaxMindASN{AccountID: "12345", LicenseKey: "secret-license"},
 	}
 	err := bp.Provision(caddy.Context{})
 	if err == nil || strings.Contains(err.Error(), "secret-license") {
@@ -351,8 +354,8 @@ func TestMaxMindCaddyfileAndCredentials(t *testing.T) {
 		{"duplicate", "asn_db /data/asn.mmdb\nasn_db maxmind {\naccount_id x\nlicense_key y\n}", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var bp BotPolicy
-			err := bp.UnmarshalCaddyfile(caddyfile.NewTestDispenser("bot_policy {\n" + tc.config + "\nblacklist asn:13335\n}"))
+			var bp MatchASN
+			err := bp.UnmarshalCaddyfile(caddyfile.NewTestDispenser("asn {\nnumbers 13335\n" + tc.config + "\n}"))
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("parse error: %v, want error %v", err, tc.wantErr)
 			}
@@ -370,9 +373,9 @@ func TestMaxMindCaddyfileAndCredentials(t *testing.T) {
 	defer server.Close()
 	maxMindDownloadURL = server.URL + "/download"
 	defer func() { maxMindDownloadURL = maxMindASNURL }()
-	var bp BotPolicy
+	var bp MatchASN
 	if err := bp.UnmarshalCaddyfile(caddyfile.NewTestDispenser(
-		"bot_policy {\nasn_db maxmind {\naccount_id {env.MAXMIND_ACCOUNT_ID}\nlicense_key {env.MAXMIND_LICENSE_KEY}\n}\nblacklist asn:13335\n}")); err != nil {
+		"asn {\nasn_db maxmind {\naccount_id {env.MAXMIND_ACCOUNT_ID}\nlicense_key {env.MAXMIND_LICENSE_KEY}\n}\nnumbers 13335\n}")); err != nil {
 		t.Fatal(err)
 	}
 	if err := bp.Provision(caddy.Context{}); err != nil {

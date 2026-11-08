@@ -3,6 +3,7 @@ package botpolicy
 import (
 	"fmt"
 	"os"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -56,8 +57,8 @@ func (db *asnDatabase) refresh() error {
 	if err != nil {
 		return fmt.Errorf("bot_policy: open asn_db %q: %w", db.path, err)
 	}
-	if reader.Metadata.DatabaseType != "GeoLite2-ASN" && reader.Metadata.DatabaseType != "GeoIP2-ASN" {
-		return fmt.Errorf("bot_policy: asn_db %q is not a MaxMind ASN database", db.path)
+	if reader.Metadata.DatabaseType != "GeoLite2-ASN" && reader.Metadata.DatabaseType != "GeoIP2-ASN" && !strings.Contains(reader.Metadata.DatabaseType, "compat=GeoLite2-ASN") {
+		return fmt.Errorf("bot_policy: asn_db %q is not a compatible ASN database", db.path)
 	}
 	db.reader.Store(reader)
 	db.modTime = info.ModTime()

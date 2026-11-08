@@ -32,7 +32,7 @@ type BotPolicy struct {
 	// Both lists are validated when the configuration is provisioned.
 	Blacklist []string `json:"blacklist,omitempty"`
 
-	// ASNDB is the local path to a MaxMind GeoLite2-ASN or GeoIP2-ASN MMDB.
+	// ASNDB is the local path to a GeoLite2-compatible or GeoIP2-ASN MMDB.
 	// It is required when either policy list has an asn: entry. An unreadable
 	// or incompatible database rejects the configuration at startup. Changes
 	// to the file are picked up automatically.

@@ -344,3 +344,44 @@ func TestASNDatabaseWatcherRefreshesFile(t *testing.T) {
 		t.Fatal("watcher did not detect database replacement")
 	}
 }
+func TestASNPolicyDatabaseTypes(t *testing.T) {
+	for _, tt := range []struct {
+		dbType string
+		accept bool
+	}{
+		{"GeoLite2-ASN", true},
+		{"GeoIP2-ASN", true},
+		{"DBIP-ASN-Lite (compat=GeoLite2-ASN)", true},
+		{"GeoLite2-City", false},
+		{"DBIP-ASN-Lite", false},
+	} {
+		t.Run(tt.dbType, func(t *testing.T) {
+			bp := &BotPolicy{
+				ASNDB:     testASNDatabase(t, tt.dbType),
+				Blacklist: []string{"asn:13335"},
+			}
+			err := bp.Provision(caddy.Context{})
+			if (err == nil) != tt.accept {
+				t.Fatalf("provision accepted=%v, want %v (error: %v)", err == nil, tt.accept, err)
+			}
+			if err != nil {
+				return
+			}
+			t.Cleanup(func() {
+				if err := bp.Cleanup(); err != nil {
+					t.Error(err)
+				}
+			})
+			req := newTurnstileRequest(http.MethodGet, "https://"+testHost+"/", nil)
+			req.TLS.HandshakeComplete = true
+			caddyhttp.SetVar(req.Context(), caddyhttp.ClientIPVarKey, "203.0.113.7")
+			rec := httptest.NewRecorder()
+			if err := bp.ServeHTTP(rec, req, passThrough); err != nil {
+				t.Fatal(err)
+			}
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("got status %d, want 403", rec.Code)
+			}
+		})
+	}
+}

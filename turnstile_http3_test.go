@@ -184,7 +184,7 @@ func TestTurnstileBoundClearanceOverHTTP3(t *testing.T) {
 	// bot_policy blocks the HTTP/3 fingerprint the handshake produced. The
 	// reload keeps the pooled QUIC listener, and with it the hook. A new
 	// visitor has no session to resume, so it sends the first hello again.
-	loadHTTP3Caddy(t, dir, port, "\tbot_policy {\n\t\tblock "+exact+"\n\t}")
+	loadHTTP3Caddy(t, dir, port, "\tbot_policy {\n\t\tblacklist "+exact+"\n\t}")
 	if resp, body := newH3Visitor(t, v.base).get("/"); resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("bot_policy: got %d %q for blocked JA4 %s, want 403", resp.StatusCode, body, exact)
 	}

@@ -13,8 +13,9 @@ import (
 //
 //	bot_policy {
 //		var_name               ja4
-//		block                  t13d1517h2_8daaf6152771_b6f405a00624
-//		block                  q13d0312h3_55b375c5d22e_cd8dafe46ac5
+//		whitelist              192.0.2.10 2001:db8:1::/48
+//		blacklist              t13d1517h2_8daaf6152771_b6f405a00624
+//		blacklist              198.51.100.0/24 q13d0312h3_55b375c5d22e_cd8dafe46ac5
 //		on_missing_fingerprint open
 //		action                 block-403
 //	}
@@ -43,12 +44,17 @@ func (bp *BotPolicy) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 					return d.ArgErr()
 				}
 
-			case "block":
+			case "whitelist", "blacklist":
+				sub := d.Val()
 				args := d.RemainingArgs()
 				if len(args) == 0 {
 					return d.ArgErr()
 				}
-				bp.Blocked = append(bp.Blocked, args...)
+				if sub == "whitelist" {
+					bp.Whitelist = append(bp.Whitelist, args...)
+				} else {
+					bp.Blacklist = append(bp.Blacklist, args...)
+				}
 
 			case "on_missing_fingerprint":
 				if !d.NextArg() {

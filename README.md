@@ -1,7 +1,8 @@
 # caddy-bot-policy
 
 A [Caddy](https://caddyserver.com) module for observing JA4 TLS client
-fingerprints, blocking selected fingerprints, and issuing
+fingerprints, whitelisting and blacklisting JA4 identifiers and client IPs,
+and issuing
 [Cloudflare Turnstile](https://developers.cloudflare.com/turnstile/)
 challenge clearances.
 
@@ -38,7 +39,9 @@ fingerprint.
 - `ja4` publishes the spec-exact `{http.vars.ja4}` for logs and
   blocklists, and the resumption-insensitive `{http.vars.ja4_bind}` for
   clearance binding.
-- `bot_policy` blocks explicitly listed JA4 values. Choose
+- `bot_policy` accepts JA4 identifiers, IP addresses and CIDRs in its
+  `whitelist` and `blacklist` lists. Blacklist matches always receive a
+  403; otherwise whitelist matches bypass Turnstile. Choose
   `on_missing_fingerprint` deliberately; a missing fingerprint is not
   proof of bad traffic.
 - `turnstile` serves a challenge until the client presents a signed

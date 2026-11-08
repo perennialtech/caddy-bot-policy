@@ -44,9 +44,9 @@ requested URL; protect any public rewrite aliases as well. For
 method-restricted matchers, include both GET and POST. Use matchers to
 exclude webhook, API and preflight paths rather than challenging them.
 
-For `asn:13335` entries, configure an automatic MaxMind
-[GeoLite2 ASN database](https://dev.maxmind.com/geoip/geolite2-free-geolocation-data/)
-download using your MaxMind account ID and license key:
+For `asn:13335` entries in either list, you can use an automatically
+managed [MaxMind GeoLite2 ASN database](https://dev.maxmind.com/geoip/geolite2-free-geolocation-data/).
+Supply your MaxMind account ID and license key:
 
 ```caddyfile
 bot_policy {
@@ -61,15 +61,17 @@ bot_policy {
 Caddy downloads the database on first start, caches it in its data
 directory, checks for updated builds daily, and swaps in new data without
 reloading. If a cached copy exists, startup does not wait for MaxMind;
-failed updates keep the cached database in service. Alternatively,
-`asn_db /path/to/GeoLite2-ASN.mmdb` continues to load a local database
-(GeoIP2 ASN is also supported) and requires a Caddy reload after external
-file updates.
+failed updates keep the cached database in service.
 
-Requests never perform external ASN lookups. Lookups use Caddy's
-resolved client IP (respecting `trusted_proxies`), not forwarding
-headers. Unknown or unmapped IPs have no ASN match; ASN rules require
-a readable database at startup.
+Alternatively, obtain a local GeoLite2, GeoIP2 ASN, or
+[DB-IP ASN Lite database](https://db-ip.com/db/download/ip-to-asn-lite),
+and set `asn_db /path/to/asn.mmdb` in `bot_policy`. Replace the file
+atomically (write a temporary file, then rename it into place); Caddy
+picks up changes within a minute without a config reload. Failed
+updates keep the last valid database. Requests never perform external
+ASN lookups. Lookups use Caddy's resolved client IP (respecting
+`trusted_proxies`), not forwarding headers. Unknown or unmapped IPs
+have no ASN match; ASN rules require a readable database at startup.
 
 ## Operational requirements
 

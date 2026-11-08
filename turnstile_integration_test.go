@@ -32,7 +32,7 @@ const integrationTurnstile = `turnstile {
 // startCaddy runs site (the body of a site block) on a free local port and
 // returns the base URL. Every %TURNSTILE% in site is replaced with a
 // configured turnstile directive.
-func startCaddy(t *testing.T, site string) string {
+func startCaddy(t *testing.T, site string, globalOptions ...string) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -42,7 +42,7 @@ func startCaddy(t *testing.T, site string) string {
 	ln.Close()
 
 	site = strings.ReplaceAll(site, "%TURNSTILE%", integrationTurnstile)
-	cfg := "{\n\tadmin off\n\tauto_https off\n\tpersist_config off\n}\n\nhttp://" + addr + " {\n" + site + "\n}\n"
+	cfg := "{\n\tadmin off\n\tauto_https off\n\tpersist_config off\n" + strings.Join(globalOptions, "\n") + "\n}\n\nhttp://" + addr + " {\n" + site + "\n}\n"
 	adapted, _, err := caddyfile.Adapter{ServerType: httpcaddyfile.ServerType{}}.Adapt([]byte(cfg), nil)
 	if err != nil {
 		t.Fatalf("adapting Caddyfile: %v\n%s", err, cfg)
@@ -324,7 +324,7 @@ func TestIntegrationDirectiveOrder(t *testing.T) {
 		secret_key b
 	}
 	bot_policy {
-		block x
+		blacklist x
 	}
 	header X-Test 1
 	ja4
@@ -505,7 +505,7 @@ func TestIntegrationOnMissingFingerprintClosedRejectsSpoofedVar(t *testing.T) {
         vars ja4 {http.request.header.X-Claimed-JA4}
         ja4
         bot_policy {
-            block t13d1517h2_8daaf6152771_b6f405a00624
+            blacklist t13d1517h2_8daaf6152771_b6f405a00624
             on_missing_fingerprint closed
         }
         respond "not blocked"
@@ -540,7 +540,7 @@ func TestIntegrationBotPolicyCacheControl(t *testing.T) {
                 header /assets/* Cache-Control "public, max-age=3600"
                 ja4
                 bot_policy {
-                    block t13d1517h2_8daaf6152771_b6f405a00624
+                    blacklist t13d1517h2_8daaf6152771_b6f405a00624
                     on_missing_fingerprint `+tt.onMissing+`
                 }
                 respond "asset"

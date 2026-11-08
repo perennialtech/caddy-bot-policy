@@ -13,7 +13,8 @@
 example.com {
 	ja4
 	bot_policy {
-		block t13d1517h2_8daaf6152771_b6f405a00624
+		whitelist 192.0.2.10 2001:db8:1::/48
+		blacklist t13d1517h2_8daaf6152771_b6f405a00624
 	}
 	turnstile {
 		site_key {env.TURNSTILE_SITE_KEY}

@@ -24,7 +24,7 @@ func newTestPolicy(t *testing.T, onMissingFingerprint string, blocked ...string)
 		VarName:              "ja4",
 		OnMissingFingerprint: onMissingFingerprint,
 		Action:               "block-403",
-		blocked:              set,
+		blacklist:            policyList{fingerprints: set},
 		logger:               zap.NewNop(),
 	}
 }
@@ -91,7 +91,7 @@ func TestServeHTTPOnMissingFingerprintOpenVsClosed(t *testing.T) {
 	}
 }
 
-func TestProvisionErrorsOnEmptyBlockList(t *testing.T) {
+func TestProvisionErrorsOnEmptyPolicyLists(t *testing.T) {
 	d := caddyfile.NewTestDispenser(`bot_policy {
 		on_missing_fingerprint open
 	}`)
@@ -100,13 +100,13 @@ func TestProvisionErrorsOnEmptyBlockList(t *testing.T) {
 		t.Fatalf("UnmarshalCaddyfile: %v", err)
 	}
 	if err := bp.Provision(caddy.Context{}); err == nil {
-		t.Error("expected Provision to error on an empty block list")
+		t.Error("expected Provision to error on empty policy lists")
 	}
 }
 
 func TestProvisionErrorsOnInvalidAction(t *testing.T) {
 	d := caddyfile.NewTestDispenser(`bot_policy {
-		block  t13d1517h2_8daaf6152771_b6f405a00624
+		blacklist  t13d1517h2_8daaf6152771_b6f405a00624
 		action redirect
 	}`)
 	var bp BotPolicy

@@ -243,7 +243,7 @@ func (ts *Turnstile) Cleanup() error {
 
 // ServeHTTP implements caddyhttp.MiddlewareHandler.
 func (ts *Turnstile) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
-	if ts.cleared(r) {
+	if r.Context().Value(policyWhitelistKey{}) == true || ts.cleared(r) {
 		return next.ServeHTTP(w, r)
 	}
 	if r.Method == http.MethodPost && isFormPost(r) {

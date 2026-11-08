@@ -13,9 +13,9 @@ lacks, so build from the [perennialtech/caddy](https://github.com/perennialtech/
 fork that adds it:
 
 ```sh
-xcaddy build v2.11.4 \
+xcaddy build v2.11.9 \
   --with github.com/perennialtech/caddy-bot-policy \
-  --replace github.com/caddyserver/caddy/v2=github.com/perennialtech/caddy/v2@v2.11.4-ja4.1
+  --replace github.com/caddyserver/caddy/v2=github.com/perennialtech/caddy/v2@v2.0.0-20261108000201-965f5962f33a
 ```
 
 Without the replacement the plugin still builds, but HTTP/3 requests have no

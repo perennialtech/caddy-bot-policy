@@ -5,8 +5,8 @@ siteverify, using the public testing keys. Not run in CI: it needs Chromium
 and network access to challenges.cloudflare.com.
 
     pip install playwright && playwright install chromium
-    xcaddy build v2.11.4 --with github.com/perennialtech/caddy-bot-policy=../.. \
-        --replace github.com/caddyserver/caddy/v2=github.com/perennialtech/caddy/v2@v2.11.4-ja4.1
+    xcaddy build v2.11.9 --with github.com/perennialtech/caddy-bot-policy=../.. \
+        --replace github.com/caddyserver/caddy/v2=github.com/perennialtech/caddy/v2@v2.0.0-20261108000201-965f5962f33a
     ./caddy run --config Caddyfile &
     python3 run.py
 """

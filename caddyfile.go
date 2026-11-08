@@ -13,7 +13,7 @@ import (
 //
 //	bot_policy {
 //		var_name               ja4
-//		whitelist              192.0.2.10 2001:db8:1::/48
+//		whitelist              192.0.2.10 2001:db8:1::/48 "ua:(?i)googlebot"
 //		blacklist              t13d1517h2_8daaf6152771_b6f405a00624
 //		blacklist              198.51.100.0/24 q13d0312h3_55b375c5d22e_cd8dafe46ac5
 //		on_missing_fingerprint open

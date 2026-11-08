@@ -1,6 +1,6 @@
 // Package botpolicy implements JA4 TLS client fingerprinting for Caddy and a
-// policy handler with JA4 and client IP whitelists/blacklists, plus a Cloudflare
-// Turnstile challenge whose clearance can be bound to that fingerprint.
+// policy handler with JA4, IP and User-Agent whitelists/blacklists, plus a
+// Cloudflare Turnstile challenge whose clearance can be bound to a fingerprint.
 //
 // It registers five modules:
 //
@@ -9,7 +9,7 @@
 //	caddy.packetconns.ja4     packet conn wrapper that does the same for each
 //	                          QUIC (HTTP/3) connection's handshake
 //	http.handlers.ja4         publishes that fingerprint as a request variable
-//	http.handlers.bot_policy  applies JA4 and client IP whitelists/blacklists
+//	http.handlers.bot_policy  applies JA4, IP and User-Agent whitelists/blacklists
 //	http.handlers.turnstile   requires a Cloudflare Turnstile clearance
 //	                          cookie, serving a challenge page without one
 //

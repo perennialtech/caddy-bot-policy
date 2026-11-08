@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/netip"
-	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -34,7 +34,8 @@ type BotPolicy struct {
 
 	// ASNDB is the local path to a MaxMind GeoLite2-ASN or GeoIP2-ASN MMDB.
 	// It is required when either policy list has an asn: entry. An unreadable
-	// or incompatible database rejects the configuration at startup.
+	// or incompatible database rejects the configuration at startup. Changes
+	// to the file are picked up automatically.
 	ASNDB string `json:"asn_db,omitempty"`
 
 	// Action is the response taken when a request is blocked. Only
@@ -44,7 +45,7 @@ type BotPolicy struct {
 
 	whitelist policyList
 	blacklist policyList
-	asnReader *maxminddb.Reader
+	asnDB     *asnDatabase
 	logger    *zap.Logger
 }
 
@@ -139,22 +140,28 @@ func (bp *BotPolicy) Provision(ctx caddy.Context) error {
 		if bp.ASNDB == "" {
 			return fmt.Errorf("bot_policy: asn_db is required for ASN rules")
 		}
-		data, err := os.ReadFile(bp.ASNDB)
+		path, err := filepath.Abs(bp.ASNDB)
 		if err != nil {
-			return fmt.Errorf("bot_policy: read asn_db %q: %w", bp.ASNDB, err)
+			return fmt.Errorf("bot_policy: resolve asn_db %q: %w", bp.ASNDB, err)
 		}
-		// Keep the database in memory: Caddy may unload a config before
-		// in-flight requests on its old HTTP server finish.
-		reader, err := maxminddb.OpenBytes(data)
+		value, _, err := asnDatabases.LoadOrNew(path, func() (caddy.Destructor, error) {
+			return newASNDatabase(path, bp.logger)
+		})
 		if err != nil {
-			return fmt.Errorf("bot_policy: open asn_db %q: %w", bp.ASNDB, err)
+			return err
 		}
-		if reader.Metadata.DatabaseType != "GeoLite2-ASN" && reader.Metadata.DatabaseType != "GeoIP2-ASN" {
-			return fmt.Errorf("bot_policy: asn_db %q is not a MaxMind ASN database", bp.ASNDB)
-		}
-		bp.asnReader = reader
+		bp.asnDB = value.(*asnDatabase)
 	}
 	return nil
+}
+
+// Cleanup releases this configuration's reference to the shared watcher.
+func (bp *BotPolicy) Cleanup() error {
+	if bp.asnDB == nil {
+		return nil
+	}
+	_, err := asnDatabases.Delete(bp.asnDB.path)
+	return err
 }
 
 // Validate ensures bp has at least one policy entry.
@@ -170,12 +177,16 @@ func (bp *BotPolicy) ServeHTTP(w http.ResponseWriter, r *http.Request, next cadd
 	// In 0-RTT, the source IP is not yet verified. A known blacklist
 	// match can still block, and a non-IP whitelist can still bypass
 	// when there are no unresolved ASN blacklist rules.
-	early := bp.asnReader != nil && r.TLS != nil && !r.TLS.HandshakeComplete
+	var reader *maxminddb.Reader
+	if bp.asnDB != nil {
+		reader = bp.asnDB.reader.Load()
+	}
+	early := reader != nil && r.TLS != nil && !r.TLS.HandshakeComplete
 	var asn uint32
-	if bp.asnReader != nil && !early {
+	if reader != nil && !early {
 		ip, _ := caddyhttp.GetVar(r.Context(), caddyhttp.ClientIPVarKey).(string)
 		if addr, err := netip.ParseAddr(ip); err == nil {
-			result := bp.asnReader.Lookup(addr.Unmap())
+			result := reader.Lookup(addr.Unmap())
 			var record struct {
 				ASN uint32 `maxminddb:"autonomous_system_number"`
 			}
@@ -242,6 +253,7 @@ func newBlockID(prefix string) string {
 // Interface guards.
 var (
 	_ caddy.Provisioner           = (*BotPolicy)(nil)
+	_ caddy.CleanerUpper          = (*BotPolicy)(nil)
 	_ caddy.Validator             = (*BotPolicy)(nil)
 	_ caddyhttp.MiddlewareHandler = (*BotPolicy)(nil)
 )

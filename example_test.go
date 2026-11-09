@@ -1,4 +1,4 @@
-package botpolicy
+package turnstile
 
 import (
 	"os"

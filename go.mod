@@ -1,4 +1,4 @@
-module github.com/perennialtech/caddy-bot-policy
+module github.com/perennialtech/caddy-turnstile
 
 go 1.26.0
 

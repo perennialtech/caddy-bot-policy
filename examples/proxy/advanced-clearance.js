@@ -1,8 +1,8 @@
 import crypto from 'crypto';
 
 // Match the default cookie name, HMAC inputs and TTL in turnstile.go.
-const cookiePrefix = 'bp_clearance';
-const cookieLabel = 'caddy-bot-policy/turnstile/cookie/v3\0';
+const cookiePrefix = 'turnstile_clearance';
+const cookieLabel = 'caddy-turnstile/turnstile/cookie/v3\0';
 const version = '3';
 const ttlSeconds = 30 * 24 * 60 * 60;
 
@@ -18,7 +18,7 @@ function sameBytes(a, b) {
 }
 
 function valid(r) {
-    const key = process.env.BP_CLEARANCE_KEY;
+    const key = process.env.TURNSTILE_CLEARANCE_KEY;
     const siteKey = process.env.TURNSTILE_SITE_KEY;
     if (!key || !siteKey) return '0';
 

@@ -1,4 +1,4 @@
-# caddy-bot-policy
+# caddy-turnstile
 
 A [Caddy](https://caddyserver.com) module providing
 [Cloudflare Turnstile](https://developers.cloudflare.com/turnstile/)
@@ -10,7 +10,7 @@ are blocked, allowed, or challenged.
 Build Caddy with the plugin using [xcaddy](https://github.com/caddyserver/xcaddy):
 
 ```sh
-xcaddy build v2.11.9 --with github.com/perennialtech/caddy-bot-policy
+xcaddy build v2.11.9 --with github.com/perennialtech/caddy-turnstile
 ```
 
 ## Configure policies and challenges
@@ -55,7 +55,7 @@ the current checkout and uses Cloudflare's testing keys unless you set
 `TURNSTILE_SECRET_KEY`. The filter takes its listen address, upstream and
 trusted proxies from `BIND`, `TARGET` and `TRUSTED_PROXIES`.
 
-CI publishes `ghcr.io/perennialtech/caddy-bot-policy:latest` and
+CI publishes `ghcr.io/perennialtech/caddy-turnstile:latest` and
 `sha-<commit SHA>` images on pushes to `main`. To use a published image,
 replace the filter's `build` in Compose with `image:` pointing at that tag.
 Authenticate to GHCR if the package is private.
@@ -98,12 +98,12 @@ an [njs cookie validator](examples/proxy/advanced-clearance.js) and a
 Install nginx's HTTP [njs module](https://nginx.org/en/docs/njs/install.html),
 load the nginx configuration as the main `nginx.conf`, and place the
 validator at `/etc/nginx/advanced-clearance.js`. Set the same
-`BP_CLEARANCE_KEY` (at least 32 bytes) and `TURNSTILE_SITE_KEY` in
+`TURNSTILE_CLEARANCE_KEY` (at least 32 bytes) and `TURNSTILE_SITE_KEY` in
 both processes; only Caddy needs `TURNSTILE_SECRET_KEY`. Replace the
 hostname, TLS certificate paths and upstream addresses for your deployment.
 Keep both upstreams inaccessible to untrusted clients.
 
-The example matches the plugin's default `bp_clearance` cookie prefix
+The example matches the plugin's default `turnstile_clearance` cookie prefix
 and a 30-day TTL. Its validator checks the derived cookie name, signature,
 hostname and issue time; simply checking cookie presence is insufficient.
 If you change the cookie format, prefix, site key or TTL, update the validator

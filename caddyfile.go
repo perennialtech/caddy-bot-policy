@@ -1,4 +1,4 @@
-package botpolicy
+package turnstile
 
 import (
 	"strconv"
@@ -16,7 +16,7 @@ import (
 //		secret_key       <key>
 //		clearance_key    <at least 32 bytes>
 //		clearance_ttl    30d
-//		cookie_name      bp_clearance
+//		cookie_name      turnstile_clearance
 //		max_pending_verifications 64
 //		allow_insecure_cookie  # HTTP-only local development; never production
 //	}

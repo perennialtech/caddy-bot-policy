@@ -1,4 +1,4 @@
-package botpolicy
+package turnstile
 
 // Integration tests: these load real Caddyfiles through Caddy's own adapter
 // and route real HTTP requests through a running server, so they catch what

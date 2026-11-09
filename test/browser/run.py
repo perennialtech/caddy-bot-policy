@@ -5,7 +5,7 @@ siteverify, using the public testing keys. Requires Chromium and network
 access to challenges.cloudflare.com.
 
     pip install playwright && playwright install chromium
-    xcaddy build v2.11.9 --with github.com/perennialtech/caddy-bot-policy=../..
+    xcaddy build v2.11.9 --with github.com/perennialtech/caddy-turnstile=../..
     ./caddy run --config Caddyfile &
     python3 run.py
 """
@@ -30,7 +30,7 @@ def clearance_jar(ctx, origin):
     return {
         c["name"]: c["value"]
         for c in ctx.cookies(origin)
-        if c["name"].startswith("bp_clearance_")
+        if c["name"].startswith("turnstile_clearance_")
     }
 
 
@@ -56,8 +56,8 @@ with sync_playwright() as p:
     check(seq == [("GET", 403), ("POST", 303), ("GET", 200)], f"challenge, verify, redirect: {seq}")
     check(not [m for m in console if "Content Security Policy" in m], "no CSP violations under a strict site policy")
 
-    cookies = [c for c in ctx.cookies(PASS) if c["name"].startswith("bp_clearance")]
-    check(len(cookies) == 1 and cookies[0]["name"].startswith("bp_clearance_"), "one clearance cookie")
+    cookies = [c for c in ctx.cookies(PASS) if c["name"].startswith("turnstile_clearance")]
+    check(len(cookies) == 1 and cookies[0]["name"].startswith("turnstile_clearance_"), "one clearance cookie")
     c = cookies[0]
     check(c["httpOnly"] and c["secure"] and c["sameSite"] == "Lax", "cookie attributes")
     days = (c["expires"] - time.time()) / 86400
@@ -78,7 +78,7 @@ with sync_playwright() as p:
 
     # Negative control: deliberately put a bogus clearance into this origin
     # and prove the exact assertion above catches it.
-    ctx.add_cookies([{"name": "bp_clearance_negative_probe", "value": "unexpected", "url": FAIL}])
+    ctx.add_cookies([{"name": "turnstile_clearance_negative_probe", "value": "unexpected", "url": FAIL}])
     try:
         require_unchanged_clearances(before_fail, clearance_jar(ctx, FAIL))
     except AssertionError:

@@ -1,5 +1,5 @@
-// Package botpolicy provides Cloudflare Turnstile challenges for Caddy.
-package botpolicy
+// Package turnstile provides Cloudflare Turnstile challenges for Caddy.
+package turnstile
 
 import (
 	"github.com/caddyserver/caddy/v2"

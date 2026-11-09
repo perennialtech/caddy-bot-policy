@@ -1,4 +1,4 @@
-package botpolicy
+package turnstile
 
 import (
 	"context"
@@ -35,7 +35,7 @@ const (
 	// turnstileAction is sent as the widget's data-action and checked in the
 	// siteverify response, so a token minted for some other form on the same
 	// site key cannot be redeemed for a clearance.
-	turnstileAction = "bot_policy_clearance"
+	turnstileAction = "turnstile_clearance"
 
 	// turnstileTokenField is the form field the widget writes its token into.
 	turnstileTokenField = "cf-turnstile-response"
@@ -43,13 +43,13 @@ const (
 	// turnstileMarkerField marks a POST as the challenge page's own
 	// submission, as opposed to some other form posted by an uncleared
 	// client.
-	turnstileMarkerField = "__bp_turnstile"
+	turnstileMarkerField = "__turnstile"
 
 	// maxTurnstileToken is the longest token Cloudflare issues.
 	maxTurnstileToken = 2048
 
 	defaultClearanceTTL    = 30 * 24 * time.Hour
-	defaultClearanceCookie = "bp_clearance"
+	defaultClearanceCookie = "turnstile_clearance"
 
 	// defaultMaxPendingVerifications bounds concurrent siteverify calls per
 	// handler. It is not a rate limit, only a cap on the goroutines and
@@ -64,9 +64,9 @@ const (
 
 	// clearanceKeyLabel separates the HMAC key derived from the Turnstile
 	// secret from any other use of that secret.
-	clearanceKeyLabel = "caddy-bot-policy/turnstile/clearance/v1"
+	clearanceKeyLabel = "caddy-turnstile/turnstile/clearance/v1"
 	// Cookie names distinguish different signing configurations.
-	clearanceCookieLabel = "caddy-bot-policy/turnstile/cookie/v3\x00"
+	clearanceCookieLabel = "caddy-turnstile/turnstile/cookie/v3\x00"
 	// Version 3 also authenticates the configured cookie prefix. Older
 	// clearances cannot cross into policies with a different cookie_name.
 	clearanceVersion = "3"

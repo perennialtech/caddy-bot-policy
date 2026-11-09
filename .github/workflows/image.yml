@@ -32,5 +32,5 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name == 'push' }}
           tags: |
-            ghcr.io/perennialtech/caddy-bot-policy:latest
-            ghcr.io/perennialtech/caddy-bot-policy:sha-${{ github.sha }}
+            ghcr.io/perennialtech/caddy-turnstile:latest
+            ghcr.io/perennialtech/caddy-turnstile:sha-${{ github.sha }}
